@@ -24,7 +24,7 @@ export class AuthService {
   generateAuthUrl(shop: string, state: string): string {
     const apiKey = this.configService.get('SHOPIFY_API_KEY');
     const scopes = this.configService.get('SHOPIFY_SCOPES');
-    const redirectUri = `${this.configService.get('APP_URL')}/auth/callback`;
+    const redirectUri = `${this.configService.get('APP_URL')}/api/v1/auth/callback`;
 
     return (
       `https://${shop}/admin/oauth/authorize?` +
