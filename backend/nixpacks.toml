@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_20"]
 
 [phases.build]
-cmds = ["npm install && npx nest build"]
+cmds = ["npm install --include=dev && npx nest build"]
 
 [start]
 cmd = "node dist/main"
