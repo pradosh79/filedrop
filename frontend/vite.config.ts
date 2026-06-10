@@ -12,6 +12,12 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    // Skip TypeScript type checking during build for faster Railway deploys
+    // Tests are excluded from the build
+    outDir: 'dist',
+    sourcemap: false,
+  },
   test: {
     globals: true,
     environment: 'jsdom',
