@@ -22,6 +22,7 @@ export class AppController {
       return res.redirect(`/api/v1/auth/install?shop=${shop}`);
     }
 
+
     // No shop param — return basic info
     return res.json({
       name: 'Custom File Upload Pro',
