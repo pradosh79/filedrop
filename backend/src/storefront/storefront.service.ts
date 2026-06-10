@@ -11,7 +11,8 @@ import { StorageService } from '../storage/storage.service';
 import { SecurityService } from '../security/security.service';
 import { EmailService } from '../email/email.service';
 import { v4 as uuid } from 'uuid';
-import * as sharp from 'sharp';
+import { imageSize } from 'image-size';
+
 
 @Injectable()
 export class StorefrontService {
@@ -110,9 +111,9 @@ export class StorefrontService {
     let imageWidth: number = null;
     let imageHeight: number = null;
     if (file.mimetype.startsWith('image/')) {
-      const meta = await sharp(file.buffer).metadata();
-      imageWidth = meta.width;
-      imageHeight = meta.height;
+      
+      
+      
       if (field.minWidth && imageWidth < field.minWidth) throw new BadRequestException(`Min width: ${field.minWidth}px`);
       if (field.maxWidth && imageWidth > field.maxWidth) throw new BadRequestException(`Max width: ${field.maxWidth}px`);
       if (field.minHeight && imageHeight < field.minHeight) throw new BadRequestException(`Min height: ${field.minHeight}px`);
