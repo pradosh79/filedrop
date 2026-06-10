@@ -56,7 +56,7 @@ export class StorageService {
     return `${merchantId}/${folder}/uploaded_files/${fileId}.${ext}`;
   }
 
-  async uploadFile(key: string, buffer: Buffer, mimeType: string): Promise<{ key: string; bucket: string }> {
+  async uploadFile(key: string, buffer: Buffer, mimeType: string, metadata?: Record<string, string>): Promise<{ key: string; bucket: string }> {
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucket, Key: key, Body: buffer, ContentType: mimeType,
     }));
