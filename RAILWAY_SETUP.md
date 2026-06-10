@@ -1,146 +1,220 @@
-# Railway Deployment Setup
+# Railway Deployment — Step by Step
 
-## Critical: Set the Root Directory in Railway UI
+## Before you start: 3 things you need
 
-Railway deploys each service from a specific folder in your repo.
-You MUST set this in the Railway dashboard or the build will fail.
-
----
-
-## Backend Service Setup
-
-In Railway dashboard → your backend service → **Settings** tab:
-
-| Setting | Value |
-|---------|-------|
-| **Root Directory** | `backend` |
-| **Build Command** | `npm install && npx nest build` |
-| **Start Command** | `node dist/main` |
-| **Watch Paths** | `backend/**` |
+1. A GitHub account (github.com — free)
+2. A Railway account (railway.app — free, sign up with GitHub)
+3. Your Shopify API Key and Secret (from partners.shopify.com → your app → API credentials)
 
 ---
 
-## Frontend Service Setup
+## Step 1 — Push this project to GitHub
 
-In Railway dashboard → your frontend service → **Settings** tab:
+On your computer, open a terminal (Command Prompt on Windows):
 
-| Setting | Value |
-|---------|-------|
-| **Root Directory** | `frontend` |
-| **Build Command** | `npm install && npm run build` |
-| **Start Command** | `npx serve dist -s -p $PORT` |
-| **Watch Paths** | `frontend/**` |
-
----
-
-## Why this matters
-
-Your repo has this structure:
-```
-filedrop/          ← GitHub repo root (Railway sees this first)
-  backend/         ← NestJS app lives here
-    package.json   ← has @nestjs/cli, nest build command
-    nixpacks.toml  ← Railway build instructions for backend
-  frontend/        ← React app lives here
-    package.json   ← has vite, npm run build
-    nixpacks.toml  ← Railway build instructions for frontend
-```
-
-If Railway uses the repo root instead of `backend/`, it cannot find
-the `nest` command because `@nestjs/cli` is only in `backend/node_modules`.
-
-Setting **Root Directory = backend** in Railway UI fixes this completely.
-
----
-
-## Step-by-step Railway deploy
-
-### 1. Push to GitHub
 ```bash
 cd filedrop
 git init
 git add .
 git commit -m "Initial commit"
+```
+
+Go to github.com → click the **+** button → **New repository**
+- Name it `filedrop`
+- Keep it Private
+- Click **Create repository**
+
+Then run (replace YOUR-USERNAME with your GitHub username):
+```bash
 git remote add origin https://github.com/YOUR-USERNAME/filedrop.git
 git push -u origin main
 ```
 
-### 2. Create Railway project
-- Go to railway.app → New Project → Deploy from GitHub repo
-- Select your `filedrop` repo
-- **Do NOT deploy yet**
+---
 
-### 3. Configure the backend service
-- Click on the auto-created service → **Settings**
-- Set **Root Directory** → `backend`
-- Set **Build Command** → `npm install && npx nest build`
-- Set **Start Command** → `node dist/main`
-- Go to **Variables** tab → add all env vars from `.env.prod.example`
+## Step 2 — Create Railway project
 
-### 4. Add MySQL database
-- Click **+ New** → **Database** → **MySQL**
-- Copy the connection variables from MySQL service → Variables tab
-- Add them to your backend service variables:
-  ```
-  DB_HOST     = (from Railway MySQL MYSQLHOST)
-  DB_PORT     = (from Railway MySQL MYSQLPORT)
-  DB_USERNAME = (from Railway MySQL MYSQLUSER)
-  DB_PASSWORD = (from Railway MySQL MYSQLPASSWORD)
-  DB_DATABASE = (from Railway MySQL MYSQLDATABASE)
-  ```
-
-### 5. Add MinIO storage
-- Click **+ New** → **Template** → search "MinIO Single Service"
-- Deploy it, set:
-  ```
-  MINIO_ROOT_USER     = cfup_minio
-  MINIO_ROOT_PASSWORD = your_strong_password
-  ```
-- Go to **Settings** → **Generate Domain** → copy the URL
-- Add to backend variables:
-  ```
-  MINIO_ENDPOINT = https://minio-xxxx.up.railway.app
-  ```
-
-### 6. Add frontend service  
-- Click **+ New** → **GitHub Repo** → same repo
-- Settings → **Root Directory** → `frontend`
-- Settings → **Build Command** → `npm install && npm run build`
-- Settings → **Start Command** → `npx serve dist -s -p $PORT`
-- Variables → add:
-  ```
-  VITE_API_URL = https://your-backend-xxxx.up.railway.app/api/v1
-  ```
-
-### 7. Deploy
-Click **Deploy** on the backend service. Build should complete in ~2 minutes.
+1. Go to **railway.app** → click **New Project**
+2. Click **Deploy from GitHub repo**
+3. Select your `filedrop` repository
+4. Railway creates one service automatically — **do not deploy yet**
 
 ---
 
-## All required backend environment variables
+## Step 3 — Add MySQL database
+
+1. In your Railway project, click the **+ New** button
+2. Click **Database** → **MySQL**
+3. Railway creates a MySQL service
+4. Click on the MySQL service → click **Variables** tab
+5. You will see variables like `MYSQLHOST`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`, `MYSQLPORT`
+6. **Keep this tab open** — you need these values in Step 5
+
+---
+
+## Step 4 — Configure the backend service (CRITICAL)
+
+Click on the **filedrop** service (the one from GitHub) → **Settings** tab:
+
+| Setting | Value to enter |
+|---------|---------------|
+| **Root Directory** | `backend` |
+| **Build Command** | `npm install && npx nest build` |
+| **Start Command** | `node dist/main` |
+
+Click **Save** after each change.
+
+---
+
+## Step 5 — Add environment variables to backend
+
+Click on the **filedrop** service → **Variables** tab → click **+ New Variable** for each:
+
+### Required — App settings
+```
+NODE_ENV          = production
+PORT              = 3000
+```
+
+### Required — Shopify (from partners.shopify.com)
+```
+SHOPIFY_API_KEY       = paste_your_api_key_here
+SHOPIFY_API_SECRET    = paste_your_api_secret_here
+SHOPIFY_SCOPES        = read_products,read_orders,write_orders,read_customers,write_metafields,read_metafields
+```
+
+### Required — Database (copy from MySQL service Variables tab)
+```
+DB_HOST     = paste MYSQLHOST value here
+DB_PORT     = paste MYSQLPORT value here  (usually 3306)
+DB_USER     = paste MYSQLUSER value here
+DB_PASSWORD = paste MYSQLPASSWORD value here
+DB_NAME     = paste MYSQLDATABASE value here
+```
+
+### Required — JWT Secret (generate one)
+Open any browser and go to:
+`https://www.uuidgenerator.net/` → copy the UUID → paste it twice to make it longer
+```
+JWT_SECRET = paste-your-long-random-string-here
+```
+
+### Required — File storage (MinIO — set up in Step 6)
+```
+STORAGE_PROVIDER    = minio
+MINIO_ENDPOINT      = (fill in after Step 6)
+MINIO_ROOT_USER     = cfup_minio
+MINIO_ROOT_PASSWORD = choose_a_strong_password
+MINIO_BUCKET        = cfup-uploads
+```
+
+### Optional — Email (skip for now, add later)
+```
+SMTP_HOST = smtp.resend.com
+SMTP_PORT = 465
+SMTP_USER = resend
+SMTP_PASS = (get free API key from resend.com)
+EMAIL_FROM = noreply@yourdomain.com
+```
+
+---
+
+## Step 6 — Add MinIO file storage
+
+1. In Railway project → click **+ New** → **Template**
+2. Search for **"MinIO Single Service"** → click Deploy
+3. On the MinIO service → **Variables** tab → add:
+   ```
+   MINIO_ROOT_USER     = cfup_minio
+   MINIO_ROOT_PASSWORD = same_password_as_in_step_5
+   ```
+4. Click on MinIO service → **Settings** → **Networking** → **Generate Domain**
+5. Copy the domain (looks like `minio-production-xxxx.up.railway.app`)
+6. Go back to your **filedrop backend service** → Variables → update:
+   ```
+   MINIO_ENDPOINT = https://minio-production-xxxx.up.railway.app
+   ```
+
+---
+
+## Step 7 — Deploy
+
+1. Click on the **filedrop** service
+2. Click **Deploy** (or it may redeploy automatically after adding variables)
+3. Watch the Build Logs — look for:
+   ```
+   Successfully compiled: XX files with swc
+   🚀 Filedrop API running on port 3000
+   ```
+4. Health check should pass at `/api/v1/health`
+
+---
+
+## Step 8 — Get your app URL
+
+After successful deploy:
+1. Click on the filedrop service → **Settings** → **Networking** → **Generate Domain**
+2. Copy the URL (e.g. `filedrop-production-xxxx.up.railway.app`)
+3. Add it as an environment variable:
+   ```
+   APP_URL      = https://filedrop-production-xxxx.up.railway.app
+   FRONTEND_URL = https://filedrop-production-xxxx.up.railway.app
+   ```
+
+---
+
+## Step 9 — Update Shopify Partners dashboard
+
+Go to **partners.shopify.com** → Apps → your app → **App setup**:
+
+- **App URL**: `https://filedrop-production-xxxx.up.railway.app`
+- **Allowed redirect URLs**: `https://filedrop-production-xxxx.up.railway.app/auth/callback`
+
+---
+
+## Troubleshooting
+
+### Build fails with "nest: not found"
+→ Make sure **Root Directory** is set to `backend` in Railway Settings
+
+### Health check fails "service unavailable"
+→ Check the **Deploy Logs** tab (not Build Logs) for the actual startup error
+→ Most common cause: DB variables not set correctly — double-check DB_HOST, DB_USER, DB_NAME, DB_PASSWORD
+
+### App crashes immediately
+→ Go to service → **Deploy Logs** → look for red error lines
+→ Usually a missing required environment variable
+
+### "Cannot connect to database"
+→ DB_HOST must be copied from the Railway MySQL service MYSQLHOST variable exactly
+→ Do not use "localhost" — Railway MySQL has its own internal hostname
+
+---
+
+## Summary of all environment variables (copy this list)
 
 ```
 NODE_ENV=production
 PORT=3000
-SHOPIFY_API_KEY=your_key_from_partners_dashboard
-SHOPIFY_API_SECRET=your_secret_from_partners_dashboard
+SHOPIFY_API_KEY=your_key
+SHOPIFY_API_SECRET=your_secret
 SHOPIFY_SCOPES=read_products,read_orders,write_orders,read_customers,write_metafields,read_metafields
-APP_URL=https://your-backend-xxxx.up.railway.app
-JWT_SECRET=run: node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
-DB_HOST=from_railway_mysql
-DB_PORT=from_railway_mysql
-DB_USERNAME=from_railway_mysql
-DB_PASSWORD=from_railway_mysql
-DB_DATABASE=from_railway_mysql
+APP_URL=https://your-app.up.railway.app
+JWT_SECRET=your_long_random_string
+DB_HOST=from_railway_mysql_MYSQLHOST
+DB_PORT=from_railway_mysql_MYSQLPORT
+DB_USER=from_railway_mysql_MYSQLUSER
+DB_PASSWORD=from_railway_mysql_MYSQLPASSWORD
+DB_NAME=from_railway_mysql_MYSQLDATABASE
 STORAGE_PROVIDER=minio
-MINIO_ENDPOINT=https://your-minio-xxxx.up.railway.app
+MINIO_ENDPOINT=https://your-minio.up.railway.app
 MINIO_ROOT_USER=cfup_minio
-MINIO_ROOT_PASSWORD=your_password
+MINIO_ROOT_PASSWORD=your_minio_password
 MINIO_BUCKET=cfup-uploads
 SMTP_HOST=smtp.resend.com
 SMTP_PORT=465
 SMTP_USER=resend
-SMTP_PASS=your_resend_api_key
+SMTP_PASS=your_resend_key
 EMAIL_FROM=noreply@yourdomain.com
-FRONTEND_URL=https://your-frontend-xxxx.up.railway.app
+FRONTEND_URL=https://your-app.up.railway.app
 ```

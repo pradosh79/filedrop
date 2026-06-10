@@ -8,15 +8,21 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
-  // CORS — allow all origins for development
+  // Global API prefix — all routes are under /api/v1
+  app.setGlobalPrefix('api/v1');
+
+  // CORS
   app.enableCors({
     origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Shopify-Shop-Domain', 'X-Shopify-Hmac-Sha256'],
+    allowedHeaders: [
+      'Content-Type', 'Authorization',
+      'X-Shopify-Shop-Domain', 'X-Shopify-Hmac-Sha256',
+    ],
   });
 
-  // Global validation
+  // Global pipes, interceptors, filters
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalInterceptors(new TransformInterceptor());
   app.useGlobalFilters(new AllExceptionsFilter());
@@ -28,13 +34,12 @@ async function bootstrap() {
       .setVersion('1.0')
       .addBearerAuth()
       .build();
-    SwaggerModule.setup('api', app, SwaggerModule.createDocument(app, config));
+    SwaggerModule.setup('api/docs', app, SwaggerModule.createDocument(app, config));
   }
 
   const port = process.env.PORT || 3000;
-  await app.listen(port);
-  console.log(`\n🚀 Filedrop API running on http://localhost:${port}`);
-  console.log(`📖 Swagger docs: http://localhost:${port}/api\n`);
+  await app.listen(port, '0.0.0.0');
+  console.log(`\n🚀 Filedrop API running on port ${port}`);
 }
 
 bootstrap();

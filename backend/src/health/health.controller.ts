@@ -12,17 +12,29 @@ export class HealthController {
     private memory: MemoryHealthIndicator,
   ) {}
 
+  /**
+   * Simple liveness probe — no DB check.
+   * Used by Railway healthcheck. Always returns 200 if the process is running.
+   */
   @Get()
+  liveness() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+    };
+  }
+
+  /**
+   * Full readiness probe — checks DB + memory.
+   * Call this manually to confirm all services are healthy.
+   */
+  @Get('ready')
   @HealthCheck()
-  check() {
+  readiness() {
     return this.health.check([
       () => this.db.pingCheck('database', { timeout: 3000 }),
       () => this.memory.checkHeap('memory_heap', 256 * 1024 * 1024),
     ]);
-  }
-
-  @Get('liveness')
-  liveness() {
-    return { status: 'ok', timestamp: new Date().toISOString() };
   }
 }
