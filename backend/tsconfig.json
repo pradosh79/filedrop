@@ -15,8 +15,7 @@
     "strictNullChecks": false,
     "strictPropertyInitialization": false,
     "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "types": ["node"]
+    "noUnusedParameters": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]

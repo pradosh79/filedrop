@@ -11,8 +11,7 @@ import { StorageService } from '../storage/storage.service';
 import { SecurityService } from '../security/security.service';
 import { EmailService } from '../email/email.service';
 import { v4 as uuid } from 'uuid';
-
-
+import { getImageDimensions } from '../common/utils/image-dimensions';
 
 @Injectable()
 export class StorefrontService {

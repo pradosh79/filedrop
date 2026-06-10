@@ -16,7 +16,6 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { StorefrontService } from './storefront.service';
-type any = Express.Multer.File;
 
 /**
  * Public API used by the Shopify theme extension (upload-widget.liquid).
