@@ -47,4 +47,4 @@ temp/
 ormconfig.json
 
 # Uploads (local dev)
-uploads/
+#uploads/
