@@ -1,7 +1,6 @@
 import {
   Controller, Get, Query, Res, BadRequestException, Logger,
 } from '@nestjs/common';
-import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthService } from './auth.service';
 import { ConfigService } from '@nestjs/config';
@@ -22,7 +21,7 @@ export class AuthController {
    * Called when merchant clicks "Install" from App Store.
    */
   @Get('install')
-  install(@Query('shop') shop: string, @Res() res: Response) {
+  install(@Query('shop') shop: string, @Res() res: any) {
     if (!shop || !shop.endsWith('.myshopify.com')) {
       throw new BadRequestException('Invalid shop parameter');
     }
@@ -42,7 +41,7 @@ export class AuthController {
   @Get('callback')
   async callback(
     @Query() query: Record<string, string>,
-    @Res() res: Response,
+    @Res() res: any,
   ) {
     const { shop, code, state, hmac } = query;
 

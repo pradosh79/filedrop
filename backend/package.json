@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Custom File Upload Pro \u2014 NestJS backend (no AWS required)",
   "scripts": {
-    "build": "npm install --include=dev && npx nest build",
+    "build": "npx nest build",
     "start": "node dist/main",
     "start:dev": "npx nest start --watch",
     "start:prod": "node dist/main",
@@ -60,9 +60,7 @@
     "@types/passport-jwt": "^4.0.1",
     "@types/nodemailer": "^6.4.14",
     "@types/uuid": "^9.0.7",
-    "@types/nock": "^11.1.0"
-  },
-  "devDependencies": {
+    "@types/nock": "^11.1.0",
     "@nestjs/testing": "^10.3.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
@@ -75,5 +73,6 @@
     "@swc/cli": "^0.3.0",
     "nock": "^13.4.0"
   },
+  "devDependencies": {},
   "config": {}
 }

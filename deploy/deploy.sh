@@ -166,7 +166,7 @@ VITE_API_URL="https://${APP_DOMAIN}/api/v1" npm run build --prefix frontend
 
 # ── Run database migrations ────────────────────────────────────
 log "Running database migrations..."
-cd backend && NODE_ENV=dev npm run migration:run && cd ..
+cd backend && NODE_ENV=production npm run migration:run && cd ..
 
 # ── Caddy config ───────────────────────────────────────────────
 log "Configuring Caddy (automatic HTTPS)..."

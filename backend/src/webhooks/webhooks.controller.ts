@@ -1,9 +1,8 @@
 import {
-  Controller, Post, Headers, Body, RawBodyRequest, Req,
+  Controller, Post, Headers, Body, Req,
   UnauthorizedException, Logger, HttpCode,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { AuthService } from '../auth/auth.service';
 import { WebhooksService } from './webhooks.service';
 
@@ -17,7 +16,7 @@ export class WebhooksController {
     private readonly webhooksService: WebhooksService,
   ) {}
 
-  private verifyWebhook(req: RawBodyRequest<Request>, hmacHeader: string): void {
+  private verifyWebhook(req: any, hmacHeader: string): void {
     if (!req.rawBody) throw new UnauthorizedException('No raw body');
     if (!hmacHeader) throw new UnauthorizedException('Missing HMAC header');
     const valid = this.authService.validateWebhookHmac(req.rawBody, hmacHeader);
@@ -27,7 +26,7 @@ export class WebhooksController {
   @Post('app/uninstalled')
   @HttpCode(200)
   async appUninstalled(
-    @Req() req: RawBodyRequest<Request>,
+    @Req() req: any,
     @Headers('x-shopify-hmac-sha256') hmac: string,
     @Headers('x-shopify-shop-domain') shop: string,
     @Body() body: any,
@@ -41,7 +40,7 @@ export class WebhooksController {
   @Post('orders/create')
   @HttpCode(200)
   async ordersCreate(
-    @Req() req: RawBodyRequest<Request>,
+    @Req() req: any,
     @Headers('x-shopify-hmac-sha256') hmac: string,
     @Headers('x-shopify-shop-domain') shop: string,
     @Body() body: any,
@@ -54,7 +53,7 @@ export class WebhooksController {
   @Post('orders/updated')
   @HttpCode(200)
   async ordersUpdated(
-    @Req() req: RawBodyRequest<Request>,
+    @Req() req: any,
     @Headers('x-shopify-hmac-sha256') hmac: string,
     @Headers('x-shopify-shop-domain') shop: string,
     @Body() body: any,
@@ -67,7 +66,7 @@ export class WebhooksController {
   @Post('products/update')
   @HttpCode(200)
   async productsUpdate(
-    @Req() req: RawBodyRequest<Request>,
+    @Req() req: any,
     @Headers('x-shopify-hmac-sha256') hmac: string,
     @Headers('x-shopify-shop-domain') shop: string,
     @Body() body: any,
