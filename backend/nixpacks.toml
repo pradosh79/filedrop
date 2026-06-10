@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs_20", "vips", "pkg-config"]
+
+[phases.install]
+cmds = ["npm ci --prefer-offline"]
+
+[phases.build]
+cmds = ["npx nest build"]
+
+[start]
+cmd = "node dist/main"
