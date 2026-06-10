@@ -14,7 +14,7 @@ In Railway dashboard → your backend service → **Settings** tab:
 | Setting | Value |
 |---------|-------|
 | **Root Directory** | `backend` |
-| **Build Command** | `npm ci && npx nest build` |
+| **Build Command** | `npm install && npx nest build` |
 | **Start Command** | `node dist/main` |
 | **Watch Paths** | `backend/**` |
 
@@ -27,7 +27,7 @@ In Railway dashboard → your frontend service → **Settings** tab:
 | Setting | Value |
 |---------|-------|
 | **Root Directory** | `frontend` |
-| **Build Command** | `npm ci && npm run build` |
+| **Build Command** | `npm install && npm run build` |
 | **Start Command** | `npx serve dist -s -p $PORT` |
 | **Watch Paths** | `frontend/**` |
 
@@ -73,7 +73,7 @@ git push -u origin main
 ### 3. Configure the backend service
 - Click on the auto-created service → **Settings**
 - Set **Root Directory** → `backend`
-- Set **Build Command** → `npm ci && npx nest build`
+- Set **Build Command** → `npm install && npx nest build`
 - Set **Start Command** → `node dist/main`
 - Go to **Variables** tab → add all env vars from `.env.prod.example`
 
@@ -105,7 +105,7 @@ git push -u origin main
 ### 6. Add frontend service  
 - Click **+ New** → **GitHub Repo** → same repo
 - Settings → **Root Directory** → `frontend`
-- Settings → **Build Command** → `npm ci && npm run build`
+- Settings → **Build Command** → `npm install && npm run build`
 - Settings → **Start Command** → `npx serve dist -s -p $PORT`
 - Variables → add:
   ```
