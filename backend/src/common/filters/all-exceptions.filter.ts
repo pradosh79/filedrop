@@ -18,10 +18,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let errors: any[] = [];
 
     if (exception instanceof HttpException) {
-      status = exception.getStatus();
-      const res = exception.getResponse();
-      message = typeof res === 'string' ? res : (res as any).message;
-      errors = (res as any).errors ?? [];
+      const httpEx = exception as HttpException;
+      status = httpEx.getStatus();
+      const res = httpEx.getResponse() as any;
+      message = typeof res === 'string' ? res : (res as Record<string,any>).message || 'Error';
+      errors = (res as Record<string,any>).errors ?? [];
     } else if (exception instanceof Error) {
       this.logger.error(`Unhandled error: ${exception.message}`, exception.stack);
     }

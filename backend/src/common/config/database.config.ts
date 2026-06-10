@@ -1,11 +1,6 @@
 import { ConfigService } from '@nestjs/config';
-import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 
-/**
- * Parse Railway's MYSQL_URL or DATABASE_URL connection string.
- * Format: mysql://user:password@host:port/database
- */
-function parseMysqlUrl(url: string): Partial<TypeOrmModuleOptions> {
+function parseMysqlUrl(url: string): Record<string, any> {
   try {
     const u = new URL(url);
     return {
@@ -20,8 +15,7 @@ function parseMysqlUrl(url: string): Partial<TypeOrmModuleOptions> {
   }
 }
 
-export const databaseConfig = (config: ConfigService): TypeOrmModuleOptions => {
-  // Railway provides MYSQL_URL or DATABASE_URL — check these first
+export const databaseConfig = (config: ConfigService): any => {
   const mysqlUrl =
     config.get<string>('MYSQL_URL') ||
     config.get<string>('DATABASE_URL') ||
@@ -31,12 +25,11 @@ export const databaseConfig = (config: ConfigService): TypeOrmModuleOptions => {
 
   return {
     type: 'mysql',
-    // URL takes priority; individual vars are fallback
-    host:     (fromUrl.host     as string) || config.get('DB_HOST',     'localhost'),
-    port:     (fromUrl.port     as number) || parseInt(config.get('DB_PORT', '3306'), 10),
-    username: (fromUrl.username as string) || config.get('DB_USER',     'cfup'),
-    password: (fromUrl.password as string) || config.get('DB_PASSWORD', 'cfup_password'),
-    database: (fromUrl.database as string) || config.get('DB_NAME',     'cfup'),
+    host:     fromUrl.host     || config.get('DB_HOST',     'localhost'),
+    port:     fromUrl.port     || parseInt(config.get('DB_PORT', '3306'), 10),
+    username: fromUrl.username || config.get('DB_USER',     'cfup'),
+    password: fromUrl.password || config.get('DB_PASSWORD', 'cfup_password'),
+    database: fromUrl.database || config.get('DB_NAME',     'cfup'),
     autoLoadEntities: true,
     synchronize: config.get<string>('NODE_ENV') !== 'production',
     logging: false,
@@ -44,9 +37,6 @@ export const databaseConfig = (config: ConfigService): TypeOrmModuleOptions => {
     timezone: 'Z',
     retryAttempts: 20,
     retryDelay: 3000,
-    extra: {
-      connectionLimit: 10,
-      connectTimeout: 30_000,
-    },
-  } as TypeOrmModuleOptions;
+    extra: { connectionLimit: 10, connectTimeout: 30000 },
+  };
 };

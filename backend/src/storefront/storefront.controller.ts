@@ -16,6 +16,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { StorefrontService } from './storefront.service';
+type any = Express.Multer.File;
 
 /**
  * Public API used by the Shopify theme extension (upload-widget.liquid).
@@ -63,7 +64,7 @@ export class StorefrontController {
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 * 1024 } }))
   @ApiOperation({ summary: 'Customer file upload (public)' })
   async uploadFile(
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file: any,
     @Body('merchantId') merchantId: string,
     @Body('fieldId') fieldId: string,
     @Body('cartToken') cartToken?: string,

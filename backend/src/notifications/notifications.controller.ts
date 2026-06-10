@@ -18,13 +18,13 @@ export class NotificationsController {
     @CurrentMerchant() merchant: Merchant,
     @Query('page') page = 1,
     @Query('limit') limit = 20,
-    @Query('unreadOnly') unreadOnly = false,
+    @Query('unreadOnly') unreadOnly?: string,
   ) {
     return this.notificationsService.getForMerchant(
       merchant.id,
       Number(page),
       Number(limit),
-      unreadOnly === 'true' || unreadOnly === true,
+      unreadOnly === 'true',
     );
   }
 

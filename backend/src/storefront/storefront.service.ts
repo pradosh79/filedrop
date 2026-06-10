@@ -84,7 +84,7 @@ export class StorefrontService {
   }
 
   async handleCustomerUpload(opts: {
-    merchantId: string; fieldId: string; file: Express.Multer.File;
+    merchantId: string; fieldId: string; file: any;
     cartToken?: string; productId?: string; variantId?: string; customerEmail?: string;
   }) {
     const { merchantId, fieldId, file } = opts;
@@ -97,23 +97,19 @@ export class StorefrontService {
 
     await this.checkPlanLimits(merchant);
 
-    const mimeOk = await this.securityService.validateMimeType(file.buffer, field.fieldType);
+    const { valid: mimeOk } = this.securityService.validateMimeType(file.buffer, field.fieldType);
     if (!mimeOk) throw new BadRequestException('File type not allowed');
 
     const extOk = this.securityService.validateExtension(file.originalname);
     if (!extOk) throw new BadRequestException('File extension not permitted');
 
-    const maxBytes = Number(field.maxFileSizeMb) * 1024 * 1024;
-    const minBytes = Number(field.minFileSizeMb) * 1024 * 1024;
-    const sizeOk = this.securityService.validateFileSize(file.size, maxBytes, minBytes);
-    if (!sizeOk) throw new BadRequestException(`File must be between ${field.minFileSizeMb}MB and ${field.maxFileSizeMb}MB`);
+    this.securityService.validateFileSize(file.size, Number(field.maxFileSizeMb), Number(field.minFileSizeMb));
 
     let imageWidth: number = null;
     let imageHeight: number = null;
     if (file.mimetype.startsWith('image/')) {
-      
-      
-      
+      const dims = getImageDimensions(file.buffer);
+      if (dims) { imageWidth = dims.width; imageHeight = dims.height; }
       if (field.minWidth && imageWidth < field.minWidth) throw new BadRequestException(`Min width: ${field.minWidth}px`);
       if (field.maxWidth && imageWidth > field.maxWidth) throw new BadRequestException(`Max width: ${field.maxWidth}px`);
       if (field.minHeight && imageHeight < field.minHeight) throw new BadRequestException(`Min height: ${field.minHeight}px`);
