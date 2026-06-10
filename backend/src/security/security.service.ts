@@ -1,9 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { FieldType } from '../uploads/entities/upload-field.entity';
-import { fromBuffer } from 'file-type';
-import { Readable } from 'stream';
-import axios from 'axios';
+import * as fileType from 'file-type';
 import * as crypto from 'crypto';
+import axios from 'axios';
 
 const BLOCKED_EXTENSIONS = [
   'exe','bat','cmd','sh','ps1','php','asp','aspx','jsp','py',
@@ -32,14 +31,14 @@ const ALLOWED_MIMES: Record<string, string[]> = {
 export class SecurityService {
   private readonly logger = new Logger(SecurityService.name);
 
-  /** Validate MIME type from buffer magic bytes. */
+  /** Detect MIME type from buffer magic bytes using file-type v14 (CJS). */
   async validateMimeType(
     buffer: Buffer,
     claimedMime: string,
     fieldType: string,
   ): Promise<{ valid: boolean; detectedMime: string }> {
     try {
-      const detected = await fromBuffer(buffer);
+      const detected = await fileType.fromBuffer(buffer);
       const detectedMime = detected?.mime ?? claimedMime;
       if (fieldType === FieldType.CUSTOM) return { valid: true, detectedMime };
       const allowed = ALLOWED_MIMES[fieldType] ?? [];
@@ -76,20 +75,12 @@ export class SecurityService {
   }
 
   /**
-   * Scan file for viruses.
-   * 
-   * Uses VirusTotal API (free: 500 req/day) when VIRUSTOTAL_API_KEY is set.
-   * Falls back to hash-based blocklist check if key not configured.
-   * Never crashes the app — returns clean if scanning is unavailable.
+   * Virus scan — uses VirusTotal API when VIRUSTOTAL_API_KEY is set.
+   * Falls back to SHA-256 hash blocklist. Never throws.
    */
   async scanForViruses(buffer: Buffer): Promise<{ isClean: boolean; virusName?: string }> {
     const apiKey = process.env.VIRUSTOTAL_API_KEY;
-
-    if (apiKey) {
-      return this.scanWithVirusTotal(buffer, apiKey);
-    }
-
-    // Basic hash check against known malware hashes (EICAR test file)
+    if (apiKey) return this.scanWithVirusTotal(buffer, apiKey);
     return this.basicHashCheck(buffer);
   }
 
@@ -98,62 +89,50 @@ export class SecurityService {
     apiKey: string,
   ): Promise<{ isClean: boolean; virusName?: string }> {
     try {
-      const FormData = (await import('form-data')).default;
+      const FormData = require('form-data');
       const form = new FormData();
       form.append('file', buffer, { filename: 'upload', contentType: 'application/octet-stream' });
 
       const uploadRes = await axios.post(
         'https://www.virustotal.com/api/v3/files',
         form,
-        {
-          headers: { 'x-apikey': apiKey, ...form.getHeaders() },
-          timeout: 30_000,
-        },
+        { headers: { 'x-apikey': apiKey, ...form.getHeaders() }, timeout: 30_000 },
       );
 
       const analysisId = uploadRes.data?.data?.id;
       if (!analysisId) return { isClean: true };
 
-      // Poll for results (max 10 attempts × 3s = 30s)
       for (let i = 0; i < 10; i++) {
         await new Promise((r) => setTimeout(r, 3000));
         const res = await axios.get(
           `https://www.virustotal.com/api/v3/analyses/${analysisId}`,
           { headers: { 'x-apikey': apiKey }, timeout: 10_000 },
         );
-
         const status = res.data?.data?.attributes?.status;
         if (status !== 'completed') continue;
-
         const stats = res.data?.data?.attributes?.stats ?? {};
         const malicious = (stats.malicious ?? 0) + (stats.suspicious ?? 0);
-
         if (malicious > 2) {
           const results = res.data?.data?.attributes?.results ?? {};
           const virusName = Object.values(results as Record<string, any>)
             .find((r: any) => r.category === 'malicious')?.result ?? 'Unknown';
           return { isClean: false, virusName };
         }
-
         return { isClean: true };
       }
-
-      return { isClean: true }; // Timed out → assume clean
+      return { isClean: true };
     } catch (err) {
-      this.logger.warn(`VirusTotal scan failed: ${err.message} — marking as clean`);
+      this.logger.warn(`VirusTotal scan failed: ${err.message} — marking clean`);
       return { isClean: true };
     }
   }
 
   private basicHashCheck(buffer: Buffer): { isClean: boolean; virusName?: string } {
     const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-    // EICAR test file hash
-    const knownMalwareHashes = new Set([
-      '275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f',
+    const known = new Set([
+      '275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f', // EICAR
     ]);
-    if (knownMalwareHashes.has(hash)) {
-      return { isClean: false, virusName: 'EICAR-Test-File' };
-    }
+    if (known.has(hash)) return { isClean: false, virusName: 'EICAR-Test-File' };
     return { isClean: true };
   }
 }

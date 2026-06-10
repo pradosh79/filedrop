@@ -1,31 +1,26 @@
 # Railway Deployment — Step by Step
 
-## Before you start: 3 things you need
-
-1. A GitHub account (github.com — free)
-2. A Railway account (railway.app — free, sign up with GitHub)
-3. Your Shopify API Key and Secret (from partners.shopify.com → your app → API credentials)
+## What you need
+- GitHub account (github.com)
+- Railway account (railway.app — sign up with GitHub)  
+- Shopify API Key + Secret (from partners.shopify.com → your app)
 
 ---
 
-## Step 1 — Push this project to GitHub
+## Step 1 — Push project to GitHub
 
-On your computer, open a terminal (Command Prompt on Windows):
+Open Command Prompt on Windows:
 
-```bash
+```
 cd filedrop
 git init
 git add .
 git commit -m "Initial commit"
 ```
 
-Go to github.com → click the **+** button → **New repository**
-- Name it `filedrop`
-- Keep it Private
-- Click **Create repository**
+Go to **github.com** → **+** → **New repository** → name it `filedrop` → **Create**
 
-Then run (replace YOUR-USERNAME with your GitHub username):
-```bash
+```
 git remote add origin https://github.com/YOUR-USERNAME/filedrop.git
 git push -u origin main
 ```
@@ -34,224 +29,150 @@ git push -u origin main
 
 ## Step 2 — Create Railway project
 
-1. Go to **railway.app** → click **New Project**
-2. Click **Deploy from GitHub repo**
-3. Select your `filedrop` repository
-4. Railway creates one service automatically — **do not deploy yet**
+1. Go to **railway.app** → **New Project** → **Deploy from GitHub repo**
+2. Select your `filedrop` repository
+3. Railway creates one service — **do not deploy yet**
 
 ---
 
-## Step 3 — Add MySQL database
+## Step 3 — Set Root Directory (MOST IMPORTANT STEP)
 
-1. In your Railway project, click the **+ New** button
-2. Click **Database** → **MySQL**
-3. Railway creates a MySQL service
-4. Click on the MySQL service → click **Variables** tab
-5. You will see variables like `MYSQLHOST`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`, `MYSQLPORT`
-6. **Keep this tab open** — you need these values in Step 5
+Click the **filedrop** service → **Settings** tab:
 
----
-
-## Step 4 — Configure the backend service (CRITICAL)
-
-Click on the **filedrop** service (the one from GitHub) → **Settings** tab:
-
-| Setting | Value to enter |
-|---------|---------------|
+| Setting | Value |
+|---------|-------|
 | **Root Directory** | `backend` |
-| **Build Command** | `npm install && npx nest build` |
+| **Build Command** | `npm install --ignore-scripts && npm rebuild sharp --update-binary \|\| true && npx nest build` |
 | **Start Command** | `node dist/main` |
 
-Click **Save** after each change.
+**Save each one.**
 
 ---
 
-## Step 5 — Add environment variables to backend
+## Step 4 — Add MySQL database
 
-Click on the **filedrop** service → **Variables** tab → click **+ New Variable** for each:
+1. In Railway project → **+ New** → **Database** → **MySQL**
+2. Wait for MySQL to start (green dot)
 
-### Required — App settings
+---
+
+## Step 5 — Add environment variables
+
+Click **filedrop service** → **Variables** tab → add these:
+
+### Copy MySQL URL from Railway (easiest method)
+
+Click **+ New Variable** and set:
+
+```
+MYSQL_URL = ${{MySQL.MYSQL_URL}}
+```
+
+> Railway will auto-fill the full connection string from your MySQL service.
+> This is the easiest way — one variable instead of five.
+
+### App settings
+
 ```
 NODE_ENV          = production
 PORT              = 3000
+SHOPIFY_API_KEY   = paste_from_partners_dashboard
+SHOPIFY_API_SECRET = paste_from_partners_dashboard
+SHOPIFY_SCOPES    = read_products,read_orders,write_orders,read_customers,write_metafields,read_metafields
+JWT_SECRET        = paste_any_long_random_string_here
+STORAGE_PROVIDER  = minio
 ```
 
-### Required — Shopify (from partners.shopify.com)
-```
-SHOPIFY_API_KEY       = paste_your_api_key_here
-SHOPIFY_API_SECRET    = paste_your_api_secret_here
-SHOPIFY_SCOPES        = read_products,read_orders,write_orders,read_customers,write_metafields,read_metafields
-```
+### Get your backend URL first (for APP_URL)
 
-### Required — Database (copy from MySQL service Variables tab)
-```
-DB_HOST     = paste MYSQLHOST value here
-DB_PORT     = paste MYSQLPORT value here  (usually 3306)
-DB_USER     = paste MYSQLUSER value here
-DB_PASSWORD = paste MYSQLPASSWORD value here
-DB_NAME     = paste MYSQLDATABASE value here
-```
+After first deploy, click **Settings** → **Networking** → **Generate Domain**
+Copy it, then add:
 
-### Required — JWT Secret (generate one)
-Open any browser and go to:
-`https://www.uuidgenerator.net/` → copy the UUID → paste it twice to make it longer
 ```
-JWT_SECRET = paste-your-long-random-string-here
-```
-
-### Required — File storage (MinIO — set up in Step 6)
-```
-STORAGE_PROVIDER    = minio
-MINIO_ENDPOINT      = (fill in after Step 6)
-MINIO_ROOT_USER     = cfup_minio
-MINIO_ROOT_PASSWORD = choose_a_strong_password
-MINIO_BUCKET        = cfup-uploads
-```
-
-### Optional — Email (skip for now, add later)
-```
-SMTP_HOST = smtp.resend.com
-SMTP_PORT = 465
-SMTP_USER = resend
-SMTP_PASS = (get free API key from resend.com)
-EMAIL_FROM = noreply@yourdomain.com
+APP_URL      = https://YOUR-DOMAIN.up.railway.app
+FRONTEND_URL = https://YOUR-DOMAIN.up.railway.app
 ```
 
 ---
 
-## Step 6 — Add MinIO file storage
+## Step 6 — Add MinIO (file storage)
 
-1. In Railway project → click **+ New** → **Template**
-2. Search for **"MinIO Single Service"** → click Deploy
-3. On the MinIO service → **Variables** tab → add:
+1. Railway project → **+ New** → **Template** → search **MinIO Single Service**
+2. Set variables on the MinIO service:
    ```
    MINIO_ROOT_USER     = cfup_minio
-   MINIO_ROOT_PASSWORD = same_password_as_in_step_5
+   MINIO_ROOT_PASSWORD = pick_a_strong_password
    ```
-4. Click on MinIO service → **Settings** → **Networking** → **Generate Domain**
-5. Copy the domain (looks like `minio-production-xxxx.up.railway.app`)
-6. Go back to your **filedrop backend service** → Variables → update:
+3. MinIO service → **Settings** → **Networking** → **Generate Domain** → copy URL
+4. Add to **filedrop service** variables:
    ```
-   MINIO_ENDPOINT = https://minio-production-xxxx.up.railway.app
+   MINIO_ENDPOINT      = https://minio-xxxx.up.railway.app
+   MINIO_ROOT_USER     = cfup_minio
+   MINIO_ROOT_PASSWORD = pick_a_strong_password
+   MINIO_BUCKET        = cfup-uploads
    ```
+
+**Or use Cloudflare R2 instead (free 10 GB, no extra Railway service needed):**
+```
+STORAGE_PROVIDER     = r2
+R2_ACCOUNT_ID        = your_cloudflare_account_id
+R2_ACCESS_KEY_ID     = your_r2_key
+R2_SECRET_ACCESS_KEY = your_r2_secret
+R2_BUCKET            = cfup-uploads
+```
 
 ---
 
 ## Step 7 — Deploy
 
-1. Click on the **filedrop** service
-2. Click **Deploy** (or it may redeploy automatically after adding variables)
-3. Watch the Build Logs — look for:
-   ```
-   Successfully compiled: XX files with swc
-   🚀 Filedrop API running on port 3000
-   ```
-4. Health check should pass at `/api/v1/health`
+Click the **filedrop** service → **Deploy**
+
+Watch **Build Logs**. You should see:
+```
+Successfully compiled: XX files with swc
+```
+
+Then watch **Deploy Logs**. You should see:
+```
+🚀 Filedrop API listening on port 3000
+```
 
 ---
 
-## Step 8 — Get your app URL
-
-After successful deploy:
-1. Click on the filedrop service → **Settings** → **Networking** → **Generate Domain**
-2. Copy the URL (e.g. `filedrop-production-xxxx.up.railway.app`)
-3. Add it as an environment variable:
-   ```
-   APP_URL      = https://filedrop-production-xxxx.up.railway.app
-   FRONTEND_URL = https://filedrop-production-xxxx.up.railway.app
-   ```
-
----
-
-## Step 9 — Update Shopify Partners dashboard
-
-Go to **partners.shopify.com** → Apps → your app → **App setup**:
-
-- **App URL**: `https://filedrop-production-xxxx.up.railway.app`
-- **Allowed redirect URLs**: `https://filedrop-production-xxxx.up.railway.app/auth/callback`
-
----
-
-## Troubleshooting
-
-### Build fails with "nest: not found"
-→ Make sure **Root Directory** is set to `backend` in Railway Settings
-
-### Health check fails "service unavailable"
-→ Check the **Deploy Logs** tab (not Build Logs) for the actual startup error
-→ Most common cause: DB variables not set correctly — double-check DB_HOST, DB_USER, DB_NAME, DB_PASSWORD
-
-### App crashes immediately
-→ Go to service → **Deploy Logs** → look for red error lines
-→ Usually a missing required environment variable
-
-### "Cannot connect to database"
-→ DB_HOST must be copied from the Railway MySQL service MYSQLHOST variable exactly
-→ Do not use "localhost" — Railway MySQL has its own internal hostname
-
----
-
-## Summary of all environment variables (copy this list)
+## Complete variable list (copy all at once)
 
 ```
 NODE_ENV=production
 PORT=3000
-SHOPIFY_API_KEY=your_key
-SHOPIFY_API_SECRET=your_secret
+MYSQL_URL=${{MySQL.MYSQL_URL}}
+SHOPIFY_API_KEY=your_key_here
+SHOPIFY_API_SECRET=your_secret_here
 SHOPIFY_SCOPES=read_products,read_orders,write_orders,read_customers,write_metafields,read_metafields
+JWT_SECRET=any_random_64_character_string_paste_here
 APP_URL=https://your-app.up.railway.app
-JWT_SECRET=your_long_random_string
-DB_HOST=from_railway_mysql_MYSQLHOST
-DB_PORT=from_railway_mysql_MYSQLPORT
-DB_USER=from_railway_mysql_MYSQLUSER
-DB_PASSWORD=from_railway_mysql_MYSQLPASSWORD
-DB_NAME=from_railway_mysql_MYSQLDATABASE
+FRONTEND_URL=https://your-app.up.railway.app
 STORAGE_PROVIDER=minio
 MINIO_ENDPOINT=https://your-minio.up.railway.app
 MINIO_ROOT_USER=cfup_minio
 MINIO_ROOT_PASSWORD=your_minio_password
 MINIO_BUCKET=cfup-uploads
-SMTP_HOST=smtp.resend.com
-SMTP_PORT=465
-SMTP_USER=resend
-SMTP_PASS=your_resend_key
-EMAIL_FROM=noreply@yourdomain.com
-FRONTEND_URL=https://your-app.up.railway.app
 ```
 
 ---
 
-## Alternative: Use Cloudflare R2 instead of MinIO (recommended for SaaS)
+## Troubleshooting
 
-Cloudflare R2 gives you **10 GB free storage with zero egress fees** — much better for a SaaS app than running MinIO on Railway.
+### "service unavailable" on health check
+→ Click **Deploy Logs** (not Build Logs) — look for red error lines  
+→ Most common: `MYSQL_URL` not set. Add `MYSQL_URL = ${{MySQL.MYSQL_URL}}`
 
-### Set up Cloudflare R2 (free)
+### "nest: not found"  
+→ Root Directory is not set to `backend`. Fix in Settings tab.
 
-1. Go to **dash.cloudflare.com** → R2 Object Storage → Create bucket
-2. Name it `cfup-uploads`
-3. Go to **Manage R2 API Tokens** → Create API Token
-4. Copy the Access Key ID and Secret Access Key
+### App crashes immediately
+→ Deploy Logs → find the error → it's almost always a missing env variable
 
-### Set these variables instead of MinIO ones
-
-```
-STORAGE_PROVIDER    = r2
-R2_ACCOUNT_ID       = your_cloudflare_account_id
-R2_ACCESS_KEY_ID    = your_r2_access_key_id
-R2_SECRET_ACCESS_KEY = your_r2_secret_key
-R2_BUCKET           = cfup-uploads
-```
-
-No MinIO service needed on Railway at all. Saves ~$1/month and is more reliable.
-
----
-
-## Optional: Add virus scanning with VirusTotal (free 500 scans/day)
-
-1. Go to **virustotal.com** → Create free account → API key
-2. Add to Railway variables:
-   ```
-   VIRUSTOTAL_API_KEY = your_api_key_here
-   ```
-
-Without this variable set, the app uses basic hash checking. It still works safely — just add VirusTotal later when you're ready.
+### How to check Deploy Logs
+1. Click your service
+2. Click the **Deploy Logs** tab (next to Build Logs)
+3. Look for lines in red — that's the crash reason

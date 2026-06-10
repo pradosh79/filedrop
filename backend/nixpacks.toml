@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "vips", "pkg-config", "python3"]
+nixPkgs = ["nodejs_20", "vips", "pkg-config"]
 
 [phases.install]
 cmds = ["npm install --ignore-scripts", "npm rebuild sharp --update-binary || true"]
