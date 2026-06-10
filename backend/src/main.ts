@@ -12,7 +12,7 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log'],
   });
 
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix('api/v1', { exclude: ['/'] });
 
   app.enableCors({
     origin: true,
