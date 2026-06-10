@@ -5,7 +5,10 @@ nixPkgs = ["nodejs_20"]
 cmds = ["npm install"]
 
 [phases.build]
-cmds = ["npx nest build"]
+cmds = ["npm run build"]
 
 [start]
 cmd = "node dist/main"
+
+[variables]
+NODE_ENV = "build"
