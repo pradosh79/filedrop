@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Custom File Upload Pro \u2014 NestJS backend (no AWS required)",
   "scripts": {
-    "build": "nest build",
+    "build": "npm install && npx nest build",
     "start": "node dist/main",
     "start:dev": "npx nest start --watch",
     "start:prod": "node dist/main",
@@ -16,7 +16,8 @@
     "migration:run": "npm run typeorm migration:run -- -d src/common/config/database.config.ts",
     "migration:revert": "npm run typeorm migration:revert -- -d src/common/config/database.config.ts",
     "migration:generate": "npm run typeorm migration:generate -- -d src/common/config/database.config.ts",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "prebuild": "npm install"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
