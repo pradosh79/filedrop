@@ -116,7 +116,7 @@ async function main() {
   const env = `# Custom File Upload Pro — Production Config
 # Generated ${new Date().toISOString()}
 
-NODE_ENV=production
+NODE_ENV=dev
 PORT=3000
 APP_URL=${appUrl}
 APP_DOMAIN=${domain}

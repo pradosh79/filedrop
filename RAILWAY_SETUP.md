@@ -142,7 +142,7 @@ Then watch **Deploy Logs**. You should see:
 ## Complete variable list (copy all at once)
 
 ```
-NODE_ENV=production
+NODE_ENV=dev
 PORT=3000
 MYSQL_URL=${{MySQL.MYSQL_URL}}
 SHOPIFY_API_KEY=your_key_here
