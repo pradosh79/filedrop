@@ -23,6 +23,7 @@ import { StorefrontModule } from './storefront/storefront.module';
 import { ProductsModule } from './products/products.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { SaaSModule } from './saas/saas.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     ProductsModule,
     AnalyticsModule,
     NotificationsModule,
+    SaaSModule,
   ],
 })
 export class AppModule {}

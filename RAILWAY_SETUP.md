@@ -218,3 +218,40 @@ SMTP_PASS=your_resend_key
 EMAIL_FROM=noreply@yourdomain.com
 FRONTEND_URL=https://your-app.up.railway.app
 ```
+
+---
+
+## Alternative: Use Cloudflare R2 instead of MinIO (recommended for SaaS)
+
+Cloudflare R2 gives you **10 GB free storage with zero egress fees** — much better for a SaaS app than running MinIO on Railway.
+
+### Set up Cloudflare R2 (free)
+
+1. Go to **dash.cloudflare.com** → R2 Object Storage → Create bucket
+2. Name it `cfup-uploads`
+3. Go to **Manage R2 API Tokens** → Create API Token
+4. Copy the Access Key ID and Secret Access Key
+
+### Set these variables instead of MinIO ones
+
+```
+STORAGE_PROVIDER    = r2
+R2_ACCOUNT_ID       = your_cloudflare_account_id
+R2_ACCESS_KEY_ID    = your_r2_access_key_id
+R2_SECRET_ACCESS_KEY = your_r2_secret_key
+R2_BUCKET           = cfup-uploads
+```
+
+No MinIO service needed on Railway at all. Saves ~$1/month and is more reliable.
+
+---
+
+## Optional: Add virus scanning with VirusTotal (free 500 scans/day)
+
+1. Go to **virustotal.com** → Create free account → API key
+2. Add to Railway variables:
+   ```
+   VIRUSTOTAL_API_KEY = your_api_key_here
+   ```
+
+Without this variable set, the app uses basic hash checking. It still works safely — just add VirusTotal later when you're ready.
