@@ -18,8 +18,7 @@ export class AdminService {
   // ── Plans ────────────────────────────────────────────────────────────────
 
   async getPlans() {
-    const plans = await this.planRepo.find({ order: { sortOrder: 'ASC' } });
-    return { data: plans };
+    return await this.planRepo.find({ order: { sortOrder: 'ASC' } });
   }
 
   async updatePlan(id: string, dto: {
@@ -46,7 +45,7 @@ export class AdminService {
     if (dto.sortOrder    !== undefined) plan.sortOrder       = dto.sortOrder;
 
     const saved = await this.planRepo.save(plan);
-    return { data: saved };
+    return saved;
   }
 
   // ── Merchants ────────────────────────────────────────────────────────────
@@ -71,7 +70,7 @@ export class AdminService {
       }),
     );
 
-    return { data: result, total: result.length };
+    return result;
   }
 
   async getMerchant(id: string) {
@@ -150,7 +149,7 @@ export class AdminService {
       order: { createdAt: 'DESC' },
       take: 100,
     });
-    return { data: uploads, total: uploads.length };
+    return uploads;
   }
 
   // ── App settings ─────────────────────────────────────────────────────────
@@ -165,11 +164,11 @@ export class AdminService {
   };
 
   async getAppSettings() {
-    return { data: this.appSettings };
+    return this.appSettings;
   }
 
   async updateAppSettings(settings: Record<string, any>) {
     this.appSettings = { ...this.appSettings, ...settings };
-    return { data: this.appSettings };
+    return this.appSettings;
   }
 }

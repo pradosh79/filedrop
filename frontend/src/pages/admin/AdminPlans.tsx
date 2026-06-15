@@ -26,7 +26,8 @@ export function AdminPlans() {
         let d: any;
         try { d = JSON.parse(text); } catch { throw new Error(`Non-JSON response: ${text.slice(0, 200)}`); }
         if (!r.ok) throw new Error(`${r.status}: ${d.message || text}`);
-        const list = Array.isArray(d.data) ? d.data : Array.isArray(d) ? d : [];
+        // API returns {success:true, data: [...]} from TransformInterceptor
+        const list = Array.isArray(d.data) ? d.data : [];
         if (list.length === 0) throw new Error(`API returned empty array. Raw: ${text.slice(0, 300)}`);
         const e: Record<string, any> = {};
         list.forEach((p: any) => {
