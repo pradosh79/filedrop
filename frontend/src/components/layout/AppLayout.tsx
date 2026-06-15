@@ -2,21 +2,29 @@ import React from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Frame, Navigation, TopBar } from '@shopify/polaris';
 import {
-  HomeIcon,
-  ArrowUpIcon,
-  ProductIcon,
-  OrderIcon,
-  CreditCardIcon,
-  SettingsIcon,
+  HomeIcon, ArrowUpIcon, ProductIcon,
+  OrderIcon, CreditCardIcon, SettingsIcon, ChartVerticalIcon,
 } from '@shopify/polaris-icons';
+import { NotificationsBell } from '../notifications/NotificationsBell';
 
 export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileNavActive, setMobileNavActive] = React.useState(false);
 
-  const isSelected = (path: string) =>
-    location.pathname.startsWith(`/app${path}`);
+  const isSelected = (path: string) => location.pathname.startsWith(`/app${path}`);
+
+  const topBarMarkup = (
+    <TopBar
+      showNavigationToggle
+      onNavigationToggle={() => setMobileNavActive(v => !v)}
+      secondaryMenu={
+        <div style={{ display: 'flex', alignItems: 'center', paddingRight: 16 }}>
+          <NotificationsBell />
+        </div>
+      }
+    />
+  );
 
   const navigationMarkup = (
     <Navigation location={location.pathname}>
@@ -51,6 +59,13 @@ export function AppLayout() {
             selected: isSelected('/orders'),
             onClick: () => navigate('/app/orders'),
           },
+          {
+            url: '/app/analytics',
+            label: 'Analytics',
+            icon: ChartVerticalIcon,
+            selected: isSelected('/analytics'),
+            onClick: () => navigate('/app/analytics'),
+          },
         ]}
       />
       <Navigation.Section
@@ -78,7 +93,7 @@ export function AppLayout() {
 
   return (
     <Frame
-      topBar={<TopBar showNavigationToggle onNavigationToggle={() => setMobileNavActive(v => !v)} />}
+      topBar={topBarMarkup}
       navigation={navigationMarkup}
       showMobileNavigation={mobileNavActive}
       onNavigationDismiss={() => setMobileNavActive(false)}

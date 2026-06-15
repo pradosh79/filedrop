@@ -25,6 +25,7 @@ import { ProductsModule } from './products/products.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SaaSModule } from './saas/saas.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   controllers: [AppController],
@@ -59,6 +60,7 @@ import { SaaSModule } from './saas/saas.module';
     AnalyticsModule,
     NotificationsModule,
     SaaSModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

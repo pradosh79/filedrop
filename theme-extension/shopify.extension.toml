@@ -4,6 +4,3 @@ api_version = "2024-01"
 type = "theme"
 name = "Custom File Upload Pro Widget"
 handle = "custom-file-upload-pro"
-
-  [extensions.targeting]
-  targets = ["section/product", "block/product"]
