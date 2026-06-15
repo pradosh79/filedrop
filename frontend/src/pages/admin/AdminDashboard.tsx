@@ -51,6 +51,12 @@ export function AdminDashboard() {
     new Date(m.createdAt).toLocaleDateString(),
   ]);
 
+  if (loading) return (
+    <Page title="Admin Dashboard">
+      <Box padding="800"><InlineStack align="center"><Spinner /></InlineStack></Box>
+    </Page>
+  );
+
   return (
     <Page title="Admin Dashboard" subtitle="Platform overview">
       <Layout>
