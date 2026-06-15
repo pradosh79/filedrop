@@ -28,7 +28,7 @@ export default function OrdersPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['orders', page],
     queryFn: () => api.get('/orders', { params: { page, limit: 20 } }).then(r => r.data),
-    keepPreviousData: true,
+    placeholderData: (prev: any) => prev,
   } as any);
 
   const { data: detail, isLoading: loadingDetail } = useQuery({

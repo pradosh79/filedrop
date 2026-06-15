@@ -79,7 +79,7 @@ function PlanCard({
           </List>
 
           {isCurrent ? (
-            <Badge tone="success" size="lg">Current Plan</Badge>
+            <Badge tone="success" >Current Plan</Badge>
           ) : (
             <Button
               primary={isPro}

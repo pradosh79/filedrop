@@ -89,10 +89,8 @@ export function SettingsPage() {
       >
         <Layout>
           {/* Appearance */}
-          <Layout.AnnotatedSection
-            title="Appearance"
-            description="Customize how the upload widget looks in your store."
-          >
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Appearance</Text><Text variant="bodySm" tone="subdued" as="p">Customize how the upload widget looks in your store.</Text></div>
             <Card>
               <div style={{ padding: '20px' }}>
                 <FormLayout>
@@ -150,13 +148,11 @@ export function SettingsPage() {
                 </FormLayout>
               </div>
             </Card>
-          </Layout.AnnotatedSection>
+          </Layout.Section>
 
           {/* Language */}
-          <Layout.AnnotatedSection
-            title="Language"
-            description="Choose the language for your upload widget."
-          >
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Language</Text><Text variant="bodySm" tone="subdued" as="p">Choose the language for your upload widget.</Text></div>
             <Card>
               <div style={{ padding: '20px' }}>
                 <Select
@@ -167,13 +163,11 @@ export function SettingsPage() {
                 />
               </div>
             </Card>
-          </Layout.AnnotatedSection>
+          </Layout.Section>
 
           {/* Notifications */}
-          <Layout.AnnotatedSection
-            title="Notifications"
-            description="Configure email notifications for uploads."
-          >
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Notifications</Text><Text variant="bodySm" tone="subdued" as="p">Configure email notifications for uploads.</Text></div>
             <Card>
               <div style={{ padding: '20px' }}>
                 <FormLayout>
@@ -200,13 +194,11 @@ export function SettingsPage() {
                 </FormLayout>
               </div>
             </Card>
-          </Layout.AnnotatedSection>
+          </Layout.Section>
 
           {/* Custom Error Messages */}
-          <Layout.AnnotatedSection
-            title="Custom Messages"
-            description="Override default messages shown to customers."
-          >
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Custom Messages</Text><Text variant="bodySm" tone="subdued" as="p">Override default messages shown to customers.</Text></div>
             <Card>
               <div style={{ padding: '20px' }}>
                 <FormLayout>
@@ -241,13 +233,11 @@ export function SettingsPage() {
                 </FormLayout>
               </div>
             </Card>
-          </Layout.AnnotatedSection>
+          </Layout.Section>
 
           {/* Security */}
-          <Layout.AnnotatedSection
-            title="Security"
-            description="Configure download link expiry."
-          >
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Security</Text><Text variant="bodySm" tone="subdued" as="p">Configure download link expiry.</Text></div>
             <Card>
               <div style={{ padding: '20px' }}>
                 <Select
@@ -264,7 +254,7 @@ export function SettingsPage() {
                 />
               </div>
             </Card>
-          </Layout.AnnotatedSection>
+          </Layout.Section>
         </Layout>
       </Page>
     </Frame>

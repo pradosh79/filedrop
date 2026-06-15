@@ -39,7 +39,7 @@ export default function UploadsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['uploads', page, search, status],
     queryFn: () => api.get('/uploads', { params: { page, limit: 25, search: search||undefined, status: status||undefined } }).then(r => r.data),
-    keepPreviousData: true,
+    placeholderData: (prev: any) => prev,
   } as any);
 
   const { mutateAsync: del, isLoading: deleting } = useMutation({
