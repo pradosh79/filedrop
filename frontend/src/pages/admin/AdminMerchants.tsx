@@ -5,7 +5,8 @@ import {
   Modal, BlockStack, Spinner,
 } from '@shopify/polaris';
 
-const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api/v1';
+import { getApiUrl } from '../../utils/config';
+const API_URL = getApiUrl();
 
 function formatBytes(b: number) {
   if (b >= 1_073_741_824) return `${(b / 1_073_741_824).toFixed(2)} GB`;

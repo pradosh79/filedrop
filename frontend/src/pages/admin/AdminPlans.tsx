@@ -5,7 +5,8 @@ import {
   FormLayout, Divider, Banner,
 } from '@shopify/polaris';
 
-const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api/v1';
+import { getApiUrl } from '../../utils/config';
+const API_URL = getApiUrl();
 
 function bytesToGB(bytes: number) { return (bytes / 1_073_741_824).toFixed(0); }
 function bytesToMB(bytes: number) { return (bytes / 1_048_576).toFixed(0); }
@@ -17,6 +18,7 @@ export function AdminPlans() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, any>>({});
   const adminKey = localStorage.getItem('admin_key') || '';
 
@@ -26,6 +28,7 @@ export function AdminPlans() {
     })
       .then(r => r.json())
       .then(d => {
+        if (!d.data) { setError(`API returned: ${JSON.stringify(d)}`); setLoading(false); return; }
         setPlans(d.data || []);
         // Initialize edit state for each plan
         const initialEdits: Record<string, any> = {};
@@ -42,7 +45,7 @@ export function AdminPlans() {
         setEdits(initialEdits);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(err => { setError(`Request failed: ${err.message}. API URL: ${API_URL}`); setLoading(false); });
   }, [adminKey]);
 
   const handleChange = (planId: string, field: string, value: string | boolean) => {
