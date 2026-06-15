@@ -31,7 +31,7 @@ export const databaseConfig = (config: ConfigService): any => {
     password: fromUrl.password || config.get('DB_PASSWORD', 'cfup_password'),
     database: fromUrl.database || config.get('DB_NAME',     'cfup'),
     autoLoadEntities: true,
-    synchronize: config.get<string>('NODE_ENV') !== 'production',
+    synchronize: true, // Auto-create tables on startup
     logging: false,
     charset: 'utf8mb4',
     timezone: 'Z',

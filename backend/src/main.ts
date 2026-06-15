@@ -21,6 +21,7 @@ async function bootstrap() {
     allowedHeaders: [
       'Content-Type', 'Authorization',
       'X-Shopify-Shop-Domain', 'X-Shopify-Hmac-Sha256',
+      'X-Admin-Key', 'x-admin-key',
     ],
   });
 
