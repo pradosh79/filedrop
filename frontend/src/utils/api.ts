@@ -26,9 +26,16 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      const shop = new URLSearchParams(window.location.search).get('shop');
+      // Token expired - get shop from localStorage and reinstall
+      const shop = localStorage.getItem('cfup_shop') ||
+        new URLSearchParams(window.location.search).get('shop');
       if (shop) {
-        window.location.href = `${BACKEND_URL.replace('/api/v1', '')}/auth/install?shop=${shop}`;
+        localStorage.removeItem('cfup_token');
+        window.location.href = `${BACKEND_URL.replace('/api/v1', '')}/api/v1/auth/install?shop=${shop}`;
+      } else {
+        // No shop known - show alert and redirect to root
+        alert('Session expired. Please reinstall the app from Shopify Admin.');
+        window.location.href = '/app';
       }
     }
     return Promise.reject(error);

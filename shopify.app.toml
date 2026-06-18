@@ -4,12 +4,11 @@ application_url = "https://filedrop-production-28dd.up.railway.app"
 embedded = true
 
 [access_scopes]
-scopes = "read_products,write_products,read_orders,write_orders,read_customers,write_metafields,read_metafields,write_script_tags,read_themes,write_themes"
+scopes = "read_products,write_products,read_orders,write_orders,read_customers,write_metafields,read_metafields"
 
 [auth]
 redirect_urls = [
-  "https://filedrop-production-28dd.up.railway.app/api/v1/auth/callback",
-  "https://filedrop-production-28dd.up.railway.app/api/v1/auth/install"
+  "https://filedrop-production-28dd.up.railway.app/api/v1/auth/callback"
 ]
 
 [webhooks]
@@ -22,17 +21,6 @@ api_version = "2024-01"
   [[webhooks.subscriptions]]
   topics = [ "orders/create" ]
   uri = "/api/v1/webhooks/orders/create"
-
-  [[webhooks.subscriptions]]
-  topics = [ "orders/updated" ]
-  uri = "/api/v1/webhooks/orders/updated"
-
-  [[webhooks.subscriptions]]
-  topics = [ "products/update" ]
-  uri = "/api/v1/webhooks/products/update"
-
-[pos]
-embedded = false
 
 [build]
 automatically_update_urls_on_dev = true
