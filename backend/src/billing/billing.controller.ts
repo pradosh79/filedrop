@@ -49,8 +49,8 @@ export class BillingController {
   }
 
   @Get('activate')
-  @ApiOperation({ summary: 'Activate subscription after Shopify redirect' })
-  activate(@CurrentMerchant() merchant: Merchant, @Query('charge_id') chargeId: string) {
+  @ApiOperation({ summary: 'Verify and activate subscription after Shopify redirect' })
+  activate(@CurrentMerchant() merchant: Merchant, @Query('charge_id') chargeId?: string) {
     return this.billingService.activateSubscription(merchant.id, chargeId);
   }
 

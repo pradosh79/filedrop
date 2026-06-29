@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
   Page, Layout, Card, Text, Badge, Button, Banner,
   List, Spinner, BlockStack, InlineStack,
 } from '@shopify/polaris';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../utils/api';
 import { formatBytes } from '../utils/format';
 
@@ -104,6 +104,17 @@ function PlanCard({
 }
 
 export function BillingPage() {
+  const queryClient = useQueryClient();
+
+  // If the merchant just approved (or declined) a Shopify checkout, this
+  // verifies the real status with Shopify and promotes our PENDING row to
+  // ACTIVE if appropriate. Safe to call even when nothing is pending.
+  useEffect(() => {
+    api.get('/billing/activate')
+      .then(() => queryClient.invalidateQueries({ queryKey: ['current-plan'] }))
+      .catch(() => { /* nothing pending, or check failed — current-plan still reflects reality */ });
+  }, []);
+
   const { data: plansResponse, isLoading: plansLoading } = useQuery({
     queryKey: ['plans'],
     queryFn: () => api.get('/billing/plans').then((r) => r.data.data),
