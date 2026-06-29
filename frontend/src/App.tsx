@@ -24,6 +24,9 @@ import { AdminMerchants } from './pages/admin/AdminMerchants';
 import { AdminSettings } from './pages/admin/AdminSettings';
 import { AdminUploads } from './pages/admin/AdminUploads';
 
+// Public pages
+import { InstallDisabledPage } from './pages/public/InstallDisabledPage';
+
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
 });
@@ -76,6 +79,9 @@ export default function App() {
                 <Route path="uploads" element={<AdminUploads />} />
                 <Route path="settings" element={<AdminSettings />} />
               </Route>
+
+              {/* Public */}
+              <Route path="/install-disabled" element={<InstallDisabledPage />} />
 
               <Route path="*" element={<Navigate to="/app" replace />} />
             </Routes>

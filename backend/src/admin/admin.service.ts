@@ -5,6 +5,7 @@ import { Plan } from '../plans/entities/plan.entity';
 import { Merchant } from '../auth/entities/merchant.entity';
 import { Upload } from '../uploads/entities/upload.entity';
 import { Subscription } from '../billing/entities/subscription.entity';
+import { AppSettings } from './entities/app-settings.entity';
 
 @Injectable()
 export class AdminService {
@@ -13,6 +14,7 @@ export class AdminService {
     @InjectRepository(Merchant) private readonly merchantRepo: Repository<Merchant>,
     @InjectRepository(Upload) private readonly uploadRepo: Repository<Upload>,
     @InjectRepository(Subscription) private readonly subRepo: Repository<Subscription>,
+    @InjectRepository(AppSettings) private readonly appSettingsRepo: Repository<AppSettings>,
   ) {}
 
   // ── Plans ────────────────────────────────────────────────────────────────
@@ -153,22 +155,26 @@ export class AdminService {
   }
 
   // ── App settings ─────────────────────────────────────────────────────────
-
-  private appSettings: Record<string, any> = {
-    appName: 'Custom File Upload Pro',
-    supportEmail: 'support@yourapp.com',
-    maxFreeStorageGB: 1,
-    defaultTrialDays: 14,
-    maintenanceMode: false,
-    allowNewRegistrations: true,
-  };
+  // Persisted as a singleton row in `app_settings` (was previously an
+  // in-memory class field, which meant saved values were lost on every
+  // restart/redeploy and never shared across multiple backend instances).
 
   async getAppSettings() {
-    return this.appSettings;
+    return this.getOrCreateAppSettingsRow();
   }
 
-  async updateAppSettings(settings: Record<string, any>) {
-    this.appSettings = { ...this.appSettings, ...settings };
-    return this.appSettings;
+  async updateAppSettings(settings: Partial<AppSettings>) {
+    const row = await this.getOrCreateAppSettingsRow();
+    Object.assign(row, settings);
+    return this.appSettingsRepo.save(row);
+  }
+
+  private async getOrCreateAppSettingsRow(): Promise<AppSettings> {
+    let row = await this.appSettingsRepo.findOne({ where: {} });
+    if (!row) {
+      row = this.appSettingsRepo.create({});
+      row = await this.appSettingsRepo.save(row);
+    }
+    return row;
   }
 }

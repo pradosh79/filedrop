@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, UseGuards, HttpCode, HttpStatus, Query,
+  Controller, Get, Post, Body, Param, UseGuards, HttpCode, HttpStatus, Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
@@ -26,8 +26,19 @@ export class BillingController {
     return this.billingService.getCurrentPlan(merchant.id);
   }
 
+  @Post('subscribe')
+  @ApiOperation({ summary: 'Subscribe to a plan (planName in request body)' })
+  subscribeBody(
+    @CurrentMerchant() merchant: Merchant,
+    @Body('planName') planName: string,
+    @Body('returnUrl') returnUrl?: string,
+  ) {
+    const url = returnUrl || `https://${merchant.shopDomain}/admin/apps/filedrop`;
+    return this.billingService.createSubscription(merchant, planName as any, url);
+  }
+
   @Post('subscribe/:planName')
-  @ApiOperation({ summary: 'Subscribe to a plan' })
+  @ApiOperation({ summary: 'Subscribe to a plan (planName in URL)' })
   subscribe(
     @CurrentMerchant() merchant: Merchant,
     @Param('planName') planName: string,

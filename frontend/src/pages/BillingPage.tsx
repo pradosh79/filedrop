@@ -36,12 +36,13 @@ const PLAN_FEATURES: Record<string, string[]> = {
 };
 
 function PlanCard({
-  plan, currentPlanName, onSelect, isLoading,
+  plan, currentPlanName, onSelect, isLoading, trialDays,
 }: {
   plan: any;
   currentPlanName: string;
   onSelect: () => void;
   isLoading: boolean;
+  trialDays: number;
 }) {
   const isCurrent = plan.name === currentPlanName;
   const isPro = plan.name === 'pro';
@@ -93,7 +94,7 @@ function PlanCard({
 
           {plan.monthlyPrice > 0 && !isCurrent && (
             <Text variant="bodySm" tone="subdued" as="p" alignment="center">
-              14-day free trial • Cancel anytime
+              {trialDays}-day free trial • Cancel anytime
             </Text>
           )}
         </BlockStack>
@@ -103,10 +104,12 @@ function PlanCard({
 }
 
 export function BillingPage() {
-  const { data: plansData, isLoading: plansLoading } = useQuery({
+  const { data: plansResponse, isLoading: plansLoading } = useQuery({
     queryKey: ['plans'],
     queryFn: () => api.get('/billing/plans').then((r) => r.data.data),
   });
+  const plansData = plansResponse?.plans ?? [];
+  const defaultTrialDays = plansResponse?.defaultTrialDays ?? 14;
 
   const { data: currentPlanData, isLoading: currentLoading } = useQuery({
     queryKey: ['current-plan'],
@@ -140,7 +143,15 @@ export function BillingPage() {
         {subscription?.status === 'trial' && (
           <Layout.Section>
             <Banner tone="info">
-              You are on a 14-day free trial. Trial ends on{' '}
+              You are on a{' '}
+              {subscription.trialStartsAt && subscription.trialEndsAt
+                ? Math.round(
+                    (new Date(subscription.trialEndsAt).getTime() -
+                      new Date(subscription.trialStartsAt).getTime()) /
+                      (24 * 60 * 60 * 1000),
+                  )
+                : defaultTrialDays}
+              -day free trial. Trial ends on{' '}
               {subscription.trialEndsAt
                 ? new Date(subscription.trialEndsAt).toLocaleDateString()
                 : '—'}
@@ -189,6 +200,7 @@ export function BillingPage() {
                 currentPlanName={currentPlan?.name ?? 'free'}
                 onSelect={() => upgradeMutation.mutate(plan.name)}
                 isLoading={upgradeMutation.isPending}
+                trialDays={defaultTrialDays}
               />
             ))}
           </div>

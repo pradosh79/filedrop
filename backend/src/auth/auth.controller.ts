@@ -61,7 +61,16 @@ export class AuthController {
     const accessToken = await this.authService.exchangeCodeForToken(shop, code);
 
     // Install/update merchant
-    const merchant = await this.authService.installMerchant(shop, accessToken);
+    let merchant;
+    try {
+      merchant = await this.authService.installMerchant(shop, accessToken);
+    } catch (err: any) {
+      if (err?.status === 403 || err?.response?.statusCode === 403) {
+        const frontendUrl = this.configService.get('FRONTEND_URL', 'http://localhost:5173');
+        return res.redirect(`${frontendUrl}/install-disabled`);
+      }
+      throw err;
+    }
 
     // Generate JWT
     const token = this.authService.signToken(merchant);

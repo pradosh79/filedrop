@@ -10,6 +10,7 @@ import { Subscription, SubscriptionStatus } from '../billing/entities/subscripti
 import { StorageService } from '../storage/storage.service';
 import { SecurityService } from '../security/security.service';
 import { EmailService } from '../email/email.service';
+import { AppSettings } from '../admin/entities/app-settings.entity';
 import { v4 as uuid } from 'uuid';
 import { getImageDimensions } from '../common/utils/image-dimensions';
 
@@ -24,6 +25,7 @@ export class StorefrontService {
     @InjectRepository(MerchantSettings) private readonly settingsRepo: Repository<MerchantSettings>,
     @InjectRepository(Plan) private readonly planRepo: Repository<Plan>,
     @InjectRepository(Subscription) private readonly subRepo: Repository<Subscription>,
+    @InjectRepository(AppSettings) private readonly appSettingsRepo: Repository<AppSettings>,
     private readonly storageService: StorageService,
     private readonly securityService: SecurityService,
     private readonly emailService: EmailService,
@@ -100,6 +102,11 @@ export class StorefrontService {
     merchantId: string; fieldId: string; file: any;
     cartToken?: string; productId?: string; variantId?: string; customerEmail?: string;
   }) {
+    const appSettings = await this.appSettingsRepo.findOne({ where: {} });
+    if (appSettings?.maintenanceMode) {
+      throw new ForbiddenException('Uploads are temporarily disabled for maintenance. Please try again shortly.');
+    }
+
     const merchantId = await this.resolveMerchantId(opts.merchantId);
     const { fieldId, file } = opts;
 

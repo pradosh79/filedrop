@@ -250,3 +250,22 @@ CREATE TABLE IF NOT EXISTS notifications (
   INDEX idx_notifications_merchant_status (merchant_id, status),
   INDEX idx_notifications_created (merchant_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ─── App Settings (global, super-admin singleton) ────────────────────────────
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  id                       CHAR(36)     NOT NULL DEFAULT (UUID()),
+  app_name                 VARCHAR(255) NOT NULL DEFAULT 'Custom File Upload Pro',
+  support_email            VARCHAR(255) NOT NULL DEFAULT 'support@yourapp.com',
+  max_free_storage_gb      INT          NOT NULL DEFAULT 1,
+  default_trial_days       INT          NOT NULL DEFAULT 14,
+  maintenance_mode         TINYINT(1)   NOT NULL DEFAULT 0,
+  allow_new_registrations  TINYINT(1)   NOT NULL DEFAULT 1,
+  created_at               DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at               DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                             ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO app_settings (id)
+SELECT UUID() WHERE NOT EXISTS (SELECT 1 FROM app_settings);

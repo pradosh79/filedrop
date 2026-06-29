@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -6,6 +6,8 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import axios from 'axios';
 import { Merchant } from './entities/merchant.entity';
+import { AppSettings } from '../admin/entities/app-settings.entity';
+import { BillingService } from '../billing/billing.service';
 
 @Injectable()
 export class AuthService {
@@ -14,6 +16,9 @@ export class AuthService {
   constructor(
     @InjectRepository(Merchant)
     private readonly merchantRepo: Repository<Merchant>,
+    @InjectRepository(AppSettings)
+    private readonly appSettingsRepo: Repository<AppSettings>,
+    private readonly billingService: BillingService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
   ) {}
@@ -97,9 +102,23 @@ export class AuthService {
 
   /**
    * Install or update merchant after OAuth.
+   * New shop signups are blocked when the super-admin has disabled
+   * registrations; existing merchants can always reinstall/reconnect.
    */
   async installMerchant(shop: string, accessToken: string): Promise<Merchant> {
     let merchant = await this.merchantRepo.findOne({ where: { shopDomain: shop } });
+    const isNewMerchant = !merchant;
+
+    if (isNewMerchant) {
+      const appSettings = await this.appSettingsRepo.findOne({ where: {} });
+      if (appSettings && appSettings.allowNewRegistrations === false) {
+        this.logger.warn(`Blocked new registration (registrations disabled): ${shop}`);
+        throw new ForbiddenException(
+          'New installations are temporarily disabled. Please try again later.',
+        );
+      }
+    }
+
     const shopInfo = await this.fetchShopInfo(shop, accessToken);
 
     if (merchant) {
@@ -123,6 +142,19 @@ export class AuthService {
 
     const saved = await this.merchantRepo.save(merchant);
     this.logger.log(`Merchant installed/updated: ${shop}`);
+
+    // Give every brand-new merchant an explicit Free-plan subscription row
+    // right away, instead of relying on other services' "no row = free" fallback.
+    if (isNewMerchant) {
+      try {
+        await this.billingService.activateFreePlan(saved.id);
+      } catch (err: any) {
+        // Don't fail the install if this step has a problem — the rest of
+        // the app already falls back to Free behavior with no row present.
+        this.logger.error(`Failed to activate default Free plan for ${shop}: ${err?.message}`);
+      }
+    }
+
     return saved;
   }
 

@@ -54,6 +54,18 @@ export class UploadsController {
     return this.uploadsService.updateField(req.user.id, id, dto);
   }
 
+  @Patch('fields/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update an upload field (PATCH alias for PUT)' })
+  updateFieldPatch(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateUploadFieldDto,
+  ) {
+    return this.uploadsService.updateField(req.user.id, id, dto);
+  }
+
   @Delete('fields/:id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -89,14 +101,15 @@ export class UploadsController {
    * Rate limited per IP, plan-limited per merchant.
    */
   @Post()
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @ApiBearerAuth()
   @UseInterceptors(
     FileInterceptor('file', {
       limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB hard cap (plan enforced in service)
       storage: undefined, // Use memory storage — we handle S3 ourselves
     }),
   )
-  @ApiOperation({ summary: 'Upload a file (called from storefront)' })
+  @ApiOperation({ summary: 'Upload a file (merchant-authenticated; e.g. testing from the admin)' })
   @ApiConsumes('multipart/form-data')
   uploadFile(
     @Request() req: any,

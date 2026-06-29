@@ -8,10 +8,12 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { Merchant } from './entities/merchant.entity';
+import { AppSettings } from '../admin/entities/app-settings.entity';
+import { BillingModule } from '../billing/billing.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Merchant]),
+    TypeOrmModule.forFeature([Merchant, AppSettings]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -22,6 +24,7 @@ import { Merchant } from './entities/merchant.entity';
       }),
     }),
     HttpModule,
+    BillingModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

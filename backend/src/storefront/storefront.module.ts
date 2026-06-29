@@ -9,12 +9,13 @@ import { Merchant } from '../auth/entities/merchant.entity';
 import { MerchantSettings } from '../settings/entities/merchant-settings.entity';
 import { Plan } from '../plans/entities/plan.entity';
 import { Subscription } from '../billing/entities/subscription.entity';
+import { AppSettings } from '../admin/entities/app-settings.entity';
 import { StorageModule } from '../storage/storage.module';
 import { SecurityModule } from '../security/security.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Upload, UploadField, Merchant, MerchantSettings, Plan, Subscription]),
+    TypeOrmModule.forFeature([Upload, UploadField, Merchant, MerchantSettings, Plan, Subscription, AppSettings]),
     MulterModule.register({ limits: { fileSize: 2 * 1024 * 1024 * 1024 } }),
     StorageModule,
     SecurityModule,
