@@ -38,6 +38,9 @@ export class MerchantSettings {
   @Column({ name: 'signed_url_expiry_seconds', default: 3600 })
   signedUrlExpirySeconds: number;
 
+  @Column({ type: 'text', name: 'custom_css', nullable: true })
+  customCss: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

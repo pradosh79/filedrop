@@ -257,6 +257,31 @@
   let cropper = null;
   let pendingEditorCallback = null;
 
+  // ── Custom CSS injection ────────────────────────────────────────────────
+  // Merchant-defined CSS from Settings → Appearance → Custom CSS.
+  // Scoped under #cfup-upload-widget so it can only affect this widget,
+  // not the rest of the theme.
+
+  async function loadCustomCss() {
+    try {
+      const res = await fetch(`${API_URL}/storefront/settings/${encodeURIComponent(SHOP)}`);
+      if (!res.ok) return;
+      const json = await res.json();
+      const css = json?.data?.customCss;
+      if (!css) return;
+
+      const styleTag = document.createElement('style');
+      styleTag.id = 'cfup-custom-css';
+      // Scope every rule under the widget root so merchant CSS can't
+      // accidentally (or intentionally) affect the rest of the storefront.
+      styleTag.textContent = `#cfup-upload-widget { } \n${css}`;
+      document.head.appendChild(styleTag);
+    } catch (e) {
+      console.error('[CFUP] Failed to load custom CSS:', e);
+    }
+  }
+  loadCustomCss();
+
   // ── Image editor ─────────────────────────────────────────────────────────
 
   const modal      = document.getElementById('cfup-editor-modal');
@@ -595,7 +620,10 @@
       btn.addEventListener('click', async () => {
         // Soft-delete on server
         try {
-          await fetch(`${API_URL}/storefront/upload/${uploadId}`, { method: 'DELETE' });
+          const delUrl = new URL(`${API_URL}/storefront/upload/${uploadId}`);
+          delUrl.searchParams.set('merchantId', SHOP);
+          delUrl.searchParams.set('cartToken', getCartToken());
+          await fetch(delUrl.toString(), { method: 'DELETE' });
         } catch { /* best-effort */ }
         const idx = idsArr.indexOf(uploadId);
         if (idx !== -1) { filesArr.splice(idx, 1); idsArr.splice(idx, 1); }

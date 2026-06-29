@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Body,
   Headers,
   Query,
@@ -34,19 +35,22 @@ export class StorefrontController {
   @Get('fields')
   @ApiOperation({ summary: 'Get upload fields for a product (public)' })
   getFields(
+    @Query('shop') shop: string,
     @Query('merchantId') merchantId: string,
     @Query('productId') productId?: string,
     @Query('variantId') variantId?: string,
     @Query('tags') tags?: string,
   ) {
-    if (!merchantId) throw new BadRequestException('merchantId is required');
+    const shopOrMerchantId = shop || merchantId;
+    if (!shopOrMerchantId) throw new BadRequestException('shop or merchantId is required');
     const tagList = tags ? tags.split(',').map(t => t.trim()) : [];
-    return this.storefrontService.getFieldsForProduct(merchantId, productId, variantId, tagList);
+    return this.storefrontService.getFieldsForProduct(shopOrMerchantId, productId, variantId, tagList);
   }
 
   /**
    * GET /storefront/settings/:merchantId
-   * Widget styling config (button color, text, border radius, language).
+   * Widget styling config (button color, text, border radius, language, custom CSS).
+   * :merchantId may be either the merchant's UUID or their Shopify shop domain.
    */
   @Get('settings/:merchantId')
   @ApiOperation({ summary: 'Get public storefront settings' })
@@ -64,20 +68,24 @@ export class StorefrontController {
   @ApiOperation({ summary: 'Customer file upload (public)' })
   async uploadFile(
     @UploadedFile() file: any,
-    @Body('merchantId') merchantId: string,
-    @Body('fieldId') fieldId: string,
+    @Body('shop') shop: string,
+    @Body('merchantId') merchantIdBody: string,
+    @Body('fieldId') fieldIdBody: string,
+    @Body('uploadFieldId') uploadFieldId: string,
     @Body('cartToken') cartToken?: string,
     @Body('productId') productId?: string,
     @Body('variantId') variantId?: string,
     @Body('customerEmail') customerEmail?: string,
     @Headers('x-shopify-shop-domain') shopDomain?: string,
   ) {
-    if (!merchantId) throw new BadRequestException('merchantId is required');
+    const shopOrMerchantId = shop || merchantIdBody;
+    const fieldId = fieldIdBody || uploadFieldId;
+    if (!shopOrMerchantId) throw new BadRequestException('shop or merchantId is required');
     if (!fieldId) throw new BadRequestException('fieldId is required');
     if (!file) throw new BadRequestException('No file provided');
 
     return this.storefrontService.handleCustomerUpload({
-      merchantId,
+      merchantId: shopOrMerchantId,
       fieldId,
       file,
       cartToken,
@@ -92,12 +100,12 @@ export class StorefrontController {
    * Customer removes their file before submitting the order.
    */
   @HttpCode(HttpStatus.NO_CONTENT)
-  @Post('upload/:uploadId/remove')
+  @Delete('upload/:uploadId')
   @ApiOperation({ summary: 'Customer removes their upload (public)' })
   removeUpload(
     @Param('uploadId') uploadId: string,
-    @Body('merchantId') merchantId: string,
-    @Body('cartToken') cartToken: string,
+    @Query('merchantId') merchantId: string,
+    @Query('cartToken') cartToken: string,
   ) {
     return this.storefrontService.removeCustomerUpload(uploadId, merchantId, cartToken);
   }

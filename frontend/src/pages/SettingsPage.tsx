@@ -28,6 +28,7 @@ export function SettingsPage() {
     notificationEmail: '',
     notifyCustomerOnUpload: false,
     signedUrlExpirySeconds: 3600,
+    customCss: '',
     customMessages: {
       fileTooLarge: '',
       fileTypeNotAllowed: '',
@@ -229,6 +230,27 @@ export function SettingsPage() {
                     onChange={setCustomMessage('uploadError')}
                     placeholder="Default: Upload failed. Please try again."
                     autoComplete="off"
+                  />
+                </FormLayout>
+              </div>
+            </Card>
+          </Layout.Section>
+
+          {/* Custom CSS */}
+          <Layout.Section>
+          <div style={{marginBottom:"8px"}}><Text variant="headingMd" as="h2">Custom CSS</Text><Text variant="bodySm" tone="subdued" as="p">Add your own CSS to restyle the upload widget on your storefront. Rules are automatically scoped to the widget, so they can't affect the rest of your theme.</Text></div>
+            <Card>
+              <div style={{ padding: '20px' }}>
+                <FormLayout>
+                  <TextField
+                    label="Custom CSS"
+                    labelHidden
+                    value={form.customCss}
+                    onChange={set('customCss')}
+                    multiline={10}
+                    autoComplete="off"
+                    placeholder={`.cfup-dropzone {\n  border-color: #6b46c1;\n  background: #faf5ff;\n}\n\n.cfup-button {\n  text-transform: uppercase;\n  letter-spacing: 0.5px;\n}`}
+                    helpText="Target widget classes such as .cfup-widget, .cfup-button, .cfup-dropzone, .cfup-file-item. Changes apply the next time the widget loads on your storefront."
                   />
                 </FormLayout>
               </div>

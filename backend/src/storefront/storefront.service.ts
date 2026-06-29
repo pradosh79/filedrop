@@ -29,7 +29,19 @@ export class StorefrontService {
     private readonly emailService: EmailService,
   ) {}
 
-  async getFieldsForProduct(merchantId: string, productId?: string, variantId?: string, tags: string[] = []) {
+  async resolveMerchantId(shopDomainOrMerchantId: string): Promise<string> {
+    // Callers may pass either the Shopify shop domain (from the widget) or
+    // an actual merchant UUID (from internal/back-office calls). Try shop
+    // domain first since that's what the storefront widget sends.
+    const byShop = await this.merchantRepo.findOne({
+      where: { shopDomain: shopDomainOrMerchantId, isActive: true },
+    });
+    if (byShop) return byShop.id;
+    return shopDomainOrMerchantId;
+  }
+
+  async getFieldsForProduct(shopOrMerchantId: string, productId?: string, variantId?: string, tags: string[] = []) {
+    const merchantId = await this.resolveMerchantId(shopOrMerchantId);
     const merchant = await this.merchantRepo.findOne({ where: { id: merchantId, isActive: true } });
     if (!merchant) throw new NotFoundException('Store not found');
 
@@ -71,7 +83,8 @@ export class StorefrontService {
       }));
   }
 
-  async getPublicSettings(merchantId: string) {
+  async getPublicSettings(shopOrMerchantId: string) {
+    const merchantId = await this.resolveMerchantId(shopOrMerchantId);
     const s = await this.settingsRepo.findOne({ where: { merchantId } });
     return {
       buttonColor: s?.buttonColor || '#008060',
@@ -79,6 +92,7 @@ export class StorefrontService {
       buttonBorderRadius: s?.buttonBorderRadius || 4,
       language: s?.language || 'en',
       customMessages: s?.customMessages || {},
+      customCss: s?.customCss || '',
     };
   }
 
@@ -86,7 +100,8 @@ export class StorefrontService {
     merchantId: string; fieldId: string; file: any;
     cartToken?: string; productId?: string; variantId?: string; customerEmail?: string;
   }) {
-    const { merchantId, fieldId, file } = opts;
+    const merchantId = await this.resolveMerchantId(opts.merchantId);
+    const { fieldId, file } = opts;
 
     const merchant = await this.merchantRepo.findOne({ where: { id: merchantId, isActive: true } });
     if (!merchant) throw new NotFoundException('Store not found');
@@ -176,7 +191,8 @@ export class StorefrontService {
     }
   }
 
-  async removeCustomerUpload(uploadId: string, merchantId: string, cartToken: string) {
+  async removeCustomerUpload(uploadId: string, shopOrMerchantId: string, cartToken: string) {
+    const merchantId = await this.resolveMerchantId(shopOrMerchantId);
     const upload = await this.uploadRepo.findOne({ where: { id: uploadId, merchantId, cartToken, deletedAt: null } });
     if (!upload) throw new NotFoundException('Upload not found');
     if (upload.orderId) throw new ForbiddenException('Cannot remove after order placed');

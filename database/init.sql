@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS `merchant_settings` (
   `notification_email`        VARCHAR(255)  NULL,
   `notify_customer_on_upload` TINYINT(1)    NOT NULL DEFAULT 0,
   `signed_url_expiry_seconds` INT           NOT NULL DEFAULT 3600,
+  `custom_css`                TEXT          NULL,
   `created_at`                DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at`                DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),

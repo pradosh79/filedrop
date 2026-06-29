@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Body, UseGuards, Param } from '@nestjs/common';
+import { Controller, Get, Patch, Put, Body, UseGuards, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { SettingsService, UpdateSettingsDto } from './settings.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -23,6 +23,14 @@ export class SettingsController {
   @Patch()
   @ApiOperation({ summary: 'Update merchant settings' })
   updateSettings(@CurrentMerchant() merchant: Merchant, @Body() dto: UpdateSettingsDto) {
+    return this.settingsService.updateSettings(merchant.id, dto);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Put()
+  @ApiOperation({ summary: 'Update merchant settings (alias for PATCH, used by admin UI)' })
+  updateSettingsPut(@CurrentMerchant() merchant: Merchant, @Body() dto: UpdateSettingsDto) {
     return this.settingsService.updateSettings(merchant.id, dto);
   }
 
