@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Page, Layout, Card, Text, Badge, Button, Banner,
   List, Spinner, BlockStack, InlineStack,
@@ -129,11 +129,21 @@ export function BillingPage() {
     queryFn: () => api.get('/billing/current').then((r) => r.data.data),
   });
 
+  const [upgradeError, setUpgradeError] = useState<string | null>(null);
+
   const upgradeMutation = useMutation({
     mutationFn: (planName: string) =>
       api.post('/billing/subscribe', { planName }).then((r) => r.data.data),
     onSuccess: ({ confirmationUrl }) => {
+      setUpgradeError(null);
       if (confirmationUrl) window.location.href = confirmationUrl;
+    },
+    onError: (err: any) => {
+      const message =
+        err?.response?.data?.message ||
+        err?.message ||
+        'Could not start checkout. Please try again.';
+      setUpgradeError(Array.isArray(message) ? message.join(', ') : message);
     },
   });
   // useMutation only tracks one global isPending flag, shared across every
@@ -160,6 +170,14 @@ export function BillingPage() {
   return (
     <Page title="Plan & Billing" subtitle="Choose the right plan for your store">
       <Layout>
+        {upgradeError && (
+          <Layout.Section>
+            <Banner tone="critical" onDismiss={() => setUpgradeError(null)}>
+              {upgradeError}
+            </Banner>
+          </Layout.Section>
+        )}
+
         {subscription?.status === 'trial' && (
           <Layout.Section>
             <Banner tone="info">

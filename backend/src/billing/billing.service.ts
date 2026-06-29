@@ -54,6 +54,12 @@ export class BillingService {
       );
     }
 
+    if (!merchant.shopDomain || !merchant.shopDomain.endsWith('.myshopify.com')) {
+      throw new BadRequestException(
+        `Cannot start checkout: "${merchant.shopDomain || 'unknown'}" is not a valid Shopify store domain.`,
+      );
+    }
+
     const trialDays = await this.getDefaultTrialDays();
     const isTestCharge = process.env.SHOPIFY_BILLING_TEST_MODE === 'true';
 
