@@ -36,12 +36,13 @@ const PLAN_FEATURES: Record<string, string[]> = {
 };
 
 function PlanCard({
-  plan, currentPlanName, onSelect, isLoading, trialDays,
+  plan, currentPlanName, onSelect, isLoading, disabled, trialDays,
 }: {
   plan: any;
   currentPlanName: string;
   onSelect: () => void;
   isLoading: boolean;
+  disabled?: boolean;
   trialDays: number;
 }) {
   const isCurrent = plan.name === currentPlanName;
@@ -86,6 +87,7 @@ function PlanCard({
               primary={isPro}
               fullWidth
               loading={isLoading}
+              disabled={disabled && !isLoading}
               onClick={onSelect}
             >
               {plan.monthlyPrice === 0 ? 'Downgrade to Free' : `Upgrade to ${plan.displayName}`}
@@ -134,6 +136,13 @@ export function BillingPage() {
       if (confirmationUrl) window.location.href = confirmationUrl;
     },
   });
+  // useMutation only tracks one global isPending flag, shared across every
+  // call to mutate() — it doesn't know which plan triggered it. Without
+  // this, clicking "Starter" would also show a loading spinner on "Pro"
+  // (and any other plan card), since they all read the same isPending.
+  const pendingPlanName = upgradeMutation.isPending
+    ? (upgradeMutation.variables as string | undefined)
+    : undefined;
 
   if (plansLoading || currentLoading) {
     return (
@@ -210,7 +219,8 @@ export function BillingPage() {
                 plan={plan}
                 currentPlanName={currentPlan?.name ?? 'free'}
                 onSelect={() => upgradeMutation.mutate(plan.name)}
-                isLoading={upgradeMutation.isPending}
+                isLoading={pendingPlanName === plan.name}
+                disabled={upgradeMutation.isPending}
                 trialDays={defaultTrialDays}
               />
             ))}

@@ -5,14 +5,7 @@ import {
   Modal, InlineStack, BlockStack, Box, Thumbnail, Avatar,
 } from '@shopify/polaris';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import axios from 'axios';
-
-const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3000' });
-api.interceptors.request.use(c => {
-  const t = localStorage.getItem('jwt');
-  if (t) c.headers.Authorization = `Bearer ${t}`;
-  return c;
-});
+import { api } from '../utils/api';
 
 const formatBytes = (b: number) => {
   if (!b) return '0 B';
@@ -42,7 +35,7 @@ export default function UploadsPage() {
     placeholderData: (prev: any) => prev,
   } as any);
 
-  const { mutateAsync: del, isLoading: deleting } = useMutation({
+  const { mutateAsync: del, isPending: deleting } = useMutation({
     mutationFn: (id: string) => api.delete(`/uploads/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['uploads'] }); setDeleteId(null); },
   });

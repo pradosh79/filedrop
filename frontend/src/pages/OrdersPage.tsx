@@ -5,14 +5,7 @@ import {
   InlineStack, BlockStack, Box, Spinner, Button, Divider,
 } from '@shopify/polaris';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import axios from 'axios';
-
-const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3000' });
-api.interceptors.request.use(c => {
-  const t = localStorage.getItem('jwt');
-  if (t) c.headers.Authorization = `Bearer ${t}`;
-  return c;
-});
+import { api } from '../utils/api';
 
 const formatBytes = (b: number) => {
   if (!b) return '0 B';
@@ -37,7 +30,7 @@ export default function OrdersPage() {
     enabled: !!orderId,
   } as any);
 
-  const { mutateAsync: downloadAll, isLoading: downloading } = useMutation({
+  const { mutateAsync: downloadAll, isPending: downloading } = useMutation({
     mutationFn: (id: string) => api.get(`/orders/${id}/download-all`).then(r => r.data),
     onSuccess: (files: any[]) => {
       files.forEach((f, i) => setTimeout(() => { const a = document.createElement('a'); a.href = f.url; a.download = f.fileName; a.click(); }, i * 500));
