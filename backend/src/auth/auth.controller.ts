@@ -44,43 +44,54 @@ export class AuthController {
     @Res() res: any,
   ) {
     const { shop, code, state, hmac } = query;
+    this.logger.log(`[callback] received: shop=${shop} state=${state} hasCode=${!!code} hasHmac=${!!hmac}`);
 
     // Validate state to prevent CSRF
     const storedState = this.stateStore.get(state);
     if (!storedState || storedState.shop !== shop || storedState.expiresAt < Date.now()) {
+      this.logger.warn(`[callback] invalid state: found=${!!storedState} shopMatch=${storedState?.shop === shop} expired=${storedState ? storedState.expiresAt < Date.now() : 'n/a'}`);
       throw new BadRequestException('Invalid state parameter');
     }
     this.stateStore.delete(state);
 
     // Validate HMAC
     if (!this.authService.validateHmac(query)) {
+      this.logger.warn(`[callback] HMAC validation failed for shop=${shop}`);
       throw new BadRequestException('Invalid HMAC signature');
     }
+    this.logger.log(`[callback] HMAC valid, exchanging code for token: shop=${shop}`);
 
-    // Exchange code for access token
-    const accessToken = await this.authService.exchangeCodeForToken(shop, code);
+    // Exchange code for access token (expiring offline token: access + refresh + expiry)
+    const shopifyToken = await this.authService.exchangeCodeForToken(shop, code);
+    this.logger.log(`[callback] got access token (len=${shopifyToken.accessToken?.length ?? 0}, hasRefreshToken=${!!shopifyToken.refreshToken}), calling installMerchant: shop=${shop}`);
 
     // Install/update merchant
     let merchant;
     try {
-      merchant = await this.authService.installMerchant(shop, accessToken);
+      merchant = await this.authService.installMerchant(shop, shopifyToken);
+      this.logger.log(`[callback] installMerchant succeeded: shop=${shop} merchantId=${merchant?.id}`);
     } catch (err: any) {
       const statusCode = typeof err?.getStatus === 'function' ? err.getStatus() : (err?.status || err?.statusCode);
+      this.logger.error(
+        `[callback] installMerchant THREW: shop=${shop} name=${err?.name} message=${err?.message} ` +
+        `resolvedStatusCode=${statusCode} axiosResponseStatus=${err?.response?.status} axiosResponseData=${JSON.stringify(err?.response?.data)}`,
+        err?.stack,
+      );
       if (statusCode === 403) {
+        this.logger.warn(`[callback] treating as 403 -> redirecting to /install-disabled: shop=${shop}`);
         const frontendUrl = this.configService.get('FRONTEND_URL', 'http://localhost:5173');
         return res.redirect(`${frontendUrl}/install-disabled`);
       }
       throw err;
     }
 
-    // Generate JWT with long expiry for offline token sessions
-    const token = this.authService.signToken(merchant);
-
-    const appUrl = this.configService.get('APP_URL');
-    // Redirect to embedded app with token
-    // Store token in cookie and redirect to frontend
-    const frontendUrl = this.configService.get('FRONTEND_URL', 'http://localhost:5173');
-    res.redirect(`${frontendUrl}/app?token=${token}&shop=${shop}`);
+    // Redirect to the app inside Shopify Admin. Shopify loads it in an
+    // iframe with the `host` param automatically (embedded = true in
+    // shopify.app.toml); App Bridge then takes over and the frontend
+    // authenticates every backend request with a session token — no
+    // custom token needs to be minted or passed through the URL here.
+    const apiKey = this.configService.get('SHOPIFY_API_KEY');
+    res.redirect(`https://${shop}/admin/apps/${apiKey}`);
   }
 
   /**
