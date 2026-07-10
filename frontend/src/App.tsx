@@ -34,6 +34,50 @@ const queryClient = new QueryClient({
 });
 
 /**
+ * Workaround for a long-standing, unresolved upstream Polaris bug
+ * (reported against many unrelated apps since 2020 — Shopify/polaris
+ * issues #2991, #3144, and others) where ResourceList's internal
+ * accessibility/status label computations intermittently call
+ * i18n.translate() with a "count" replacement (itemsLength, itemsCount,
+ * totalItemsCount, selectedItemsCount) missing, throwing an uncaught
+ * render error. This has now been observed for TWO different keys in
+ * production (a11yCheckboxSelectAllMultiple, then showing) — a systemic
+ * pattern, not an isolated one-off — so every ResourceList key that uses
+ * one of these count-type placeholders is hardened here, not just the
+ * ones that happened to crash first.
+ *
+ * Polaris's translate() only requires replacement values for placeholders
+ * that actually appear in the template string — it doesn't care about
+ * extra/unused replacement keys. Removing the fragile count placeholders
+ * from these templates makes the interpolation succeed regardless of
+ * whether Polaris's internal code happens to pass them or not.
+ *
+ * Trade-off: these labels lose the numeric count (e.g. "Showing uploads"
+ * instead of "Showing 20 uploads", "Select all uploads" instead of
+ * "Select all 20 uploads"). That's a real, minor UX/accessibility
+ * regression, accepted deliberately in exchange for the page never
+ * crashing over it.
+ */
+const translationsOverride = {
+  ...enTranslations,
+  Polaris: {
+    ...enTranslations.Polaris,
+    ResourceList: {
+      ...enTranslations.Polaris.ResourceList,
+      showing: 'Showing {resource}',
+      showingTotalCount: 'Showing {resource}',
+      selected: 'Selected',
+      allItemsSelected: 'All {resourceNamePlural} in your store are selected',
+      allFilteredItemsSelected: 'All {resourceNamePlural} in this filter are selected',
+      selectAllItems: 'Select all {resourceNamePlural} in your store',
+      selectAllFilteredItems: 'Select all {resourceNamePlural} in this filter',
+      a11yCheckboxDeselectAllMultiple: 'Deselect all {resourceNamePlural}',
+      a11yCheckboxSelectAllMultiple: 'Select all {resourceNamePlural}',
+    },
+  },
+};
+
+/**
  * Persists `shop`/`host` from the URL so the API client (utils/api.ts) can
  * still figure out which shop to redirect to for re-install if a session
  * token request ever fails. App Bridge (loaded via CDN in index.html) reads
@@ -68,7 +112,7 @@ function AdminRoute() {
 
 function AppWithBridge() {
   return (
-    <AppProvider i18n={enTranslations}>
+    <AppProvider i18n={translationsOverride}>
       <ShopContextHandler>
         <AppRoutes />
       </ShopContextHandler>

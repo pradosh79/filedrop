@@ -1,0 +1,7 @@
+api_version = "2024-01"
+
+[[extensions]]
+type = "theme"
+name = "Filedrop"
+handle = "filedrop"
+uid = "0b2bfc78-0c53-91cf-b949-9783feb7e43a2cc58590"

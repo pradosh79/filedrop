@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+
 import {
   Page, Card, ResourceList, ResourceItem, Text,
   Badge, EmptyState, Pagination, Modal,
@@ -6,6 +7,8 @@ import {
 } from '@shopify/polaris';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../utils/api';
+
+const RESOURCE_NAME = { singular: 'order', plural: 'orders' };
 
 const formatBytes = (b: number) => {
   if (!b) return '0 B';
@@ -20,13 +23,13 @@ export default function OrdersPage() {
 
   const { data, isLoading } = useQuery({
     queryKey: ['orders', page],
-    queryFn: () => api.get('/orders', { params: { page, limit: 20 } }).then(r => r.data),
+    queryFn: () => api.get('/orders', { params: { page, limit: 20 } }).then(r => r.data.data),
     placeholderData: (prev: any) => prev,
   } as any);
 
   const { data: detail, isLoading: loadingDetail } = useQuery({
     queryKey: ['order-detail', orderId],
-    queryFn: () => api.get(`/orders/${orderId}/uploads`).then(r => r.data),
+    queryFn: () => api.get(`/orders/${orderId}/uploads`).then(r => r.data.data),
     enabled: !!orderId,
   } as any);
 
@@ -45,7 +48,7 @@ export default function OrdersPage() {
     <Page title="Orders with Uploads" subtitle={`${total} orders`}>
       <Card>
         <ResourceList
-          resourceName={{ singular: 'order', plural: 'orders' }}
+          resourceName={RESOURCE_NAME}
           items={orders}
           loading={isLoading}
           renderItem={(order: any) => (
