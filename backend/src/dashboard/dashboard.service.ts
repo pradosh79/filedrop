@@ -16,22 +16,31 @@ export class DashboardService {
   async getStats(merchantId: string) {
     const merchant = await this.merchantRepo.findOne({ where: { id: merchantId } });
     const today = new Date(); today.setHours(0,0,0,0);
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
-    const [totalUploads, uploadsToday, uploadsThisMonth, activeFields] = await Promise.all([
-      this.uploadRepo.count({ where: { merchantId, deletedAt: null } }),
+    // Total Uploads and This Month now read from the SAME cumulative
+    // merchant.totalUploads / merchant.monthlyUploads counters that
+    // billing.service.ts and the plan-limit check already use as the
+    // real source of truth. Previously these were computed as a live
+    // COUNT(*) against current uploads rows, which silently diverged from
+    // the Billing page's numbers whenever any upload got deleted (manual
+    // cleanup, a customer removing their own upload, scheduled retention,
+    // etc.) — the count would go down, but the cumulative usage that
+    // actually governs the plan limit would not. Showing two different
+    // numbers for "how many uploads this month" on two different pages of
+    // the same app was confusing and wrong; this makes them match.
+    //
+    // "Uploads Today" has no equivalent cumulative counter on Merchant (only
+    // total/monthly are tracked), so it necessarily stays a live query.
+    const [uploadsToday, activeFields] = await Promise.all([
       this.uploadRepo.createQueryBuilder('u')
         .where('u.merchantId = :merchantId', { merchantId })
         .andWhere('u.createdAt >= :today', { today })
         .andWhere('u.deletedAt IS NULL')
         .getCount(),
-      this.uploadRepo.createQueryBuilder('u')
-        .where('u.merchantId = :merchantId', { merchantId })
-        .andWhere('u.createdAt >= :monthStart', { monthStart })
-        .andWhere('u.deletedAt IS NULL')
-        .getCount(),
       this.fieldRepo.count({ where: { merchantId, isActive: true } }),
     ]);
+    const totalUploads = merchant?.totalUploads ?? 0;
+    const uploadsThisMonth = merchant?.monthlyUploads ?? 0;
 
     const ordersResult = await this.uploadRepo.createQueryBuilder('u')
       .select('COUNT(DISTINCT u.orderId)', 'count')
@@ -63,7 +72,19 @@ export class DashboardService {
       .groupBy('DATE(u.createdAt)')
       .orderBy('date', 'ASC')
       .getRawMany();
-    return rows;
+
+    // Zero-fill the full 30-day window instead of only returning days that
+    // have activity — without this, a store with uploads on only one or
+    // two days shows a chart with a single point rather than a proper
+    // 30-day trend line, the same issue already fixed for Monthly Uploads.
+    const countByDate = new Map(rows.map((r: any) => [r.date, Number(r.count)]));
+    const filled: { date: string; count: number }[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const key = d.toISOString().slice(0, 10);
+      filled.push({ date: key, count: countByDate.get(key) ?? 0 });
+    }
+    return filled;
   }
 
   async getMonthlyUploads(merchantId: string) {
@@ -76,19 +97,50 @@ export class DashboardService {
       .groupBy('month')
       .orderBy('month', 'ASC')
       .getRawMany();
-    return rows;
+
+    // Without this, a store with activity in only one month (very common
+    // for a new install, or a dev/test store like this one) returns a
+    // single row — which a bar chart renders as one bar stretched across
+    // the whole width, looking like something's broken rather than just
+    // "there's one month of data so far." Zero-filling the last 6 months
+    // gives the chart proper context either way, the same way the "Daily
+    // Uploads (Last 30 Days)" chart already always shows a fixed window.
+    const countByMonth = new Map(rows.map((r: any) => [r.month, Number(r.count)]));
+    const months = 6;
+    const filled: { month: string; count: number }[] = [];
+    const cursor = new Date();
+    cursor.setDate(1); // avoid month-length rollover issues when subtracting months
+    for (let i = months - 1; i >= 0; i--) {
+      const d = new Date(cursor.getFullYear(), cursor.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      filled.push({ month: key, count: countByMonth.get(key) ?? 0 });
+    }
+    return filled;
   }
 
   async getStorageGrowth(merchantId: string) {
+    const days = 30;
+    const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const rows = await this.uploadRepo.createQueryBuilder('u')
       .select('DATE(u.createdAt)', 'date')
-      .addSelect('SUM(u.fileSizeBytes)', 'bytes')
+      .addSelect('SUM(u.fileSizeBytes)', 'dailyBytes')
       .where('u.merchantId = :merchantId', { merchantId })
+      .andWhere('u.createdAt >= :from', { from })
       .andWhere('u.deletedAt IS NULL')
       .groupBy('DATE(u.createdAt)')
       .orderBy('date', 'ASC')
       .getRawMany();
-    return rows;
+
+    const bytesByDate = new Map(rows.map((r: any) => [r.date, Number(r.dailyBytes ?? 0)]));
+    let cumulative = 0;
+    const filled: { date: string; bytes: number }[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const key = d.toISOString().slice(0, 10);
+      cumulative += bytesByDate.get(key) ?? 0;
+      filled.push({ date: key, bytes: cumulative });
+    }
+    return filled;
   }
 
   async getRecentUploads(merchantId: string) {

@@ -78,11 +78,71 @@ export class WebhooksService {
         }
       } catch (err: any) {
         if (err?.response?.status === 422) {
-          this.logger.log(`⏭  REST webhook already exists: ${webhook.topic}`);
+          // Shopify allows only ONE REST webhook subscription per (app, topic) —
+          // not per (app, topic, address). A 422 here means a subscription for
+          // this topic already exists, possibly from an old deployment pointing
+          // at a stale/dead URL (e.g. a previous Railway domain or ngrok
+          // tunnel). Simply logging and moving on — the old behavior — leaves
+          // that stale address in place forever, silently breaking webhook
+          // delivery on every future redeploy that changes APP_URL. Instead,
+          // look up the existing subscription and update it if the address
+          // has drifted, so deploys self-heal instead of requiring a manual
+          // GraphQL fix or app reinstall.
+          await this.healRestWebhookAddress(merchant, webhook, accessToken);
         } else {
           this.logger.error(`❌ REST webhook failed ${webhook.topic}: ${err?.message}`);
         }
       }
+    }
+  }
+
+  /**
+   * Called after a 422 "already exists" on webhook creation. Fetches the
+   * existing subscription for this topic and, if its address doesn't match
+   * our current appUrl, PUTs an update so delivery resumes without any
+   * manual intervention.
+   */
+  private async healRestWebhookAddress(
+    merchant: Merchant,
+    webhook: { topic: string; address: string },
+    accessToken: string,
+  ): Promise<void> {
+    try {
+      const listRes = await axios.get(
+        `https://${merchant.shopDomain}/admin/api/2026-07/webhooks.json`,
+        {
+          params: { topic: webhook.topic },
+          headers: { 'X-Shopify-Access-Token': accessToken },
+          timeout: 10_000,
+        },
+      );
+      const existing = listRes.data?.webhooks?.[0];
+      if (!existing) {
+        this.logger.warn(
+          `⚠️  REST webhook for ${webhook.topic} reported "already exists" but none found on lookup (${merchant.shopDomain})`,
+        );
+        return;
+      }
+      if (existing.address === webhook.address) {
+        this.logger.log(`⏭  REST webhook already exists and address is current: ${webhook.topic}`);
+        return;
+      }
+      await axios.put(
+        `https://${merchant.shopDomain}/admin/api/2026-07/webhooks/${existing.id}.json`,
+        { webhook: { id: existing.id, address: webhook.address } },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10_000,
+        },
+      );
+      this.logger.log(
+        `🔧 REST webhook address updated for ${webhook.topic}: ${existing.address} → ${webhook.address}`,
+      );
+    } catch (err: any) {
+      this.logger.error(`❌ REST webhook heal failed for ${webhook.topic}: ${err?.message}`);
     }
   }
 
@@ -135,7 +195,11 @@ export class WebhooksService {
         if (errors.length === 0) {
           this.logger.log(`✅ GraphQL webhook registered: ${topic}`);
         } else if (alreadyExists) {
-          this.logger.log(`⏭  GraphQL webhook already exists: ${topic}`);
+          // Same underlying issue as the REST path: one subscription per
+          // (app, topic). Look up the existing one and update its callback
+          // URL if it has drifted from our current appUrl, instead of
+          // leaving a possibly-dead address in place indefinitely.
+          await this.healGraphQLWebhookAddress(merchant, topic, address, accessToken);
         } else {
           this.logger.warn(`⚠️  GraphQL webhook errors for ${topic}: ${JSON.stringify(errors)}`);
         }
@@ -146,23 +210,128 @@ export class WebhooksService {
   }
 
   /**
+   * Called after webhookSubscriptionCreate reports "already exists" for a
+   * topic. Queries the existing subscription's id + callbackUrl and, if it
+   * doesn't match our current address, issues webhookSubscriptionUpdate.
+   */
+  private async healGraphQLWebhookAddress(
+    merchant: Merchant,
+    topic: string,
+    address: string,
+    accessToken: string,
+  ): Promise<void> {
+    const query = `
+      {
+        webhookSubscriptions(first: 5, topics: [${topic}]) {
+          edges {
+            node {
+              id
+              endpoint { ... on WebhookHttpEndpoint { callbackUrl } }
+            }
+          }
+        }
+      }
+    `;
+    try {
+      const res = await axios.post(
+        `https://${merchant.shopDomain}/admin/api/2026-07/graphql.json`,
+        { query },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10_000,
+        },
+      );
+      const node = res.data?.data?.webhookSubscriptions?.edges?.[0]?.node;
+      if (!node) {
+        this.logger.warn(
+          `⚠️  GraphQL webhook for ${topic} reported "already exists" but none found on lookup (${merchant.shopDomain})`,
+        );
+        return;
+      }
+      if (node.endpoint?.callbackUrl === address) {
+        this.logger.log(`⏭  GraphQL webhook already exists and address is current: ${topic}`);
+        return;
+      }
+      const updateMutation = `
+        mutation {
+          webhookSubscriptionUpdate(
+            id: "${node.id}"
+            webhookSubscription: { callbackUrl: "${address}" }
+          ) {
+            userErrors { field message }
+            webhookSubscription { id }
+          }
+        }
+      `;
+      const updateRes = await axios.post(
+        `https://${merchant.shopDomain}/admin/api/2026-07/graphql.json`,
+        { query: updateMutation },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10_000,
+        },
+      );
+      const updateErrors = updateRes.data?.data?.webhookSubscriptionUpdate?.userErrors || [];
+      if (updateErrors.length === 0) {
+        this.logger.log(
+          `🔧 GraphQL webhook address updated for ${topic}: ${node.endpoint?.callbackUrl} → ${address}`,
+        );
+      } else {
+        this.logger.warn(`⚠️  GraphQL webhook update errors for ${topic}: ${JSON.stringify(updateErrors)}`);
+      }
+    } catch (err: any) {
+      this.logger.error(`❌ GraphQL webhook heal failed for ${topic}: ${err?.message}`);
+    }
+  }
+
+  /**
    * When an order is created: associate uploads, add timeline note, notify merchant.
    */
   async handleOrderCreate(shopDomain: string, order: any): Promise<void> {
     const merchant = await this.merchantRepo.findOne({ where: { shopDomain } });
-    if (!merchant) return;
+    if (!merchant) {
+      this.logger.warn(
+        `orders/create webhook for shop "${shopDomain}" has no matching merchant record — was the app installed under a different shop domain string?`,
+      );
+      return;
+    }
 
     const cartToken = order.cart_token;
     const shopifyOrderId = String(order.id);
     const orderId = String(order.order_number ?? order.id);
 
-    if (!cartToken) return;
+    if (!cartToken) {
+      this.logger.warn(
+        `orders/create webhook for #${orderId} (${shopDomain}) had no cart_token — cannot check for uploads to link.`,
+      );
+      return;
+    }
 
     const uploads = await this.uploadRepo.find({
       where: { merchantId: merchant.id, cartToken },
     });
 
-    if (!uploads.length) return;
+    if (!uploads.length) {
+      // Not necessarily a bug — most orders have no upload at all. But if this
+      // fires for an order you KNOW had a file uploaded first, the cartToken
+      // captured at upload time didn't match order.cart_token, which is
+      // exactly the failure mode the /cart.js fix in the theme widget
+      // addresses (see upload-widget.liquid getCartToken()).
+      //
+      // Uses .log() not .debug(): main.ts only enables ['error','warn','log']
+      // levels, so .debug() here would be silently swallowed and this branch
+      // would be invisible in production logs even when it fires.
+      this.logger.log(
+        `ℹ️  No uploads found matching cartToken for order #${orderId} (${shopDomain}). cartToken from webhook: ${cartToken}`,
+      );
+      return;
+    }
 
     await this.uploadRepo.update(
       uploads.map((u) => u.id),

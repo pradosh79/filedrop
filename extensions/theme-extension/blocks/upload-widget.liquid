@@ -304,6 +304,80 @@
   let allUploadedIds = [];
   let cropper = null;
   let pendingEditorCallback = null;
+  // Cached cart token for the lifetime of this page load — avoids
+  // refetching /cart.js on every file upload/remove. Reset naturally on
+  // navigation. Declared here (rather than down near getCartToken) since
+  // rebindUploadsToRealCartToken(), defined just below, also needs it.
+  let _cachedCartToken = null;
+
+  // ── Rebind uploads to the cart's final token after Add to Cart ─────────────
+  // See getCartToken() below for why the token captured at upload time can
+  // be provisional. This detects a successful Add to Cart (by patching both
+  // fetch and XMLHttpRequest, since different themes' cart drawers use
+  // either) and re-syncs any uploads made earlier in this session to
+  // whatever cart token Shopify has now finalized.
+
+  async function rebindUploadsToRealCartToken() {
+    if (!allUploadedIds.length) return;
+    const oldToken = _cachedCartToken;
+    try {
+      const res = await fetch('/cart.js', { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) return;
+      const cart = await res.json();
+      const freshToken = cart && cart.token ? String(cart.token).split('?')[0] : null;
+      if (!freshToken || freshToken === oldToken) return; // nothing changed, or nothing to fix
+
+      const rebindRes = await fetch(`${API_URL}/storefront/upload/rebind-cart-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shop: SHOP,
+          uploadIds: allUploadedIds,
+          oldCartToken: oldToken,
+          cartToken: freshToken,
+        }),
+      });
+      if (rebindRes.ok) {
+        _cachedCartToken = freshToken; // keep subsequent uploads in this session consistent too
+      }
+    } catch (e) { /* best-effort — an upload staying on its original token is not fatal */ }
+  }
+
+  function watchForAddToCart() {
+    const looksLikeCartAdd = (url) => typeof url === 'string' && /\/cart\/add(\.js)?(\?|$)/.test(url);
+
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url);
+      const p = origFetch.apply(this, arguments);
+      if (looksLikeCartAdd(url) && (!init || !init.method || init.method.toUpperCase() === 'POST')) {
+        p.then((r) => { if (r.ok) setTimeout(rebindUploadsToRealCartToken, 300); }).catch(() => {});
+      }
+      return p;
+    };
+
+    const OrigXHR = window.XMLHttpRequest;
+    const origOpen = OrigXHR.prototype.open;
+    OrigXHR.prototype.open = function (method, url) {
+      if (looksLikeCartAdd(url)) {
+        this.addEventListener('load', () => {
+          if (this.status >= 200 && this.status < 300) setTimeout(rebindUploadsToRealCartToken, 300);
+        });
+      }
+      return origOpen.apply(this, arguments);
+    };
+
+    // Traditional (non-AJAX) form submit to /cart/add — the page will
+    // navigate away immediately after, so there's no time to call our
+    // endpoint here; best-effort attempt fired without blocking submission.
+    document.addEventListener('submit', (e) => {
+      const form = e.target;
+      if (form && form.action && looksLikeCartAdd(form.action)) {
+        rebindUploadsToRealCartToken();
+      }
+    }, true);
+  }
+  watchForAddToCart();
 
   // ── Custom CSS injection ────────────────────────────────────────────────
   // Merchant-defined CSS from Settings → Appearance → Custom CSS.
@@ -848,7 +922,8 @@
         const variantId = widget.dataset.variantId;
         if (variantId) formData.append('variantId', variantId);
         formData.append('uploadFieldId', field.id);
-        formData.append('cartToken', getCartToken());
+        const cartToken = await getCartToken();
+        if (cartToken) formData.append('cartToken', cartToken);
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${API_URL}/storefront/upload`);
@@ -903,7 +978,8 @@
         try {
           const delUrl = new URL(`${API_URL}/storefront/upload/${uploadId}`);
           delUrl.searchParams.set('merchantId', SHOP);
-          delUrl.searchParams.set('cartToken', getCartToken());
+          const cartTokenForDelete = await getCartToken();
+          if (cartTokenForDelete) delUrl.searchParams.set('cartToken', cartTokenForDelete);
           await fetch(delUrl.toString(), { method: 'DELETE' });
         } catch { /* best-effort */ }
         const idx = idsArr.indexOf(uploadId);
@@ -979,9 +1055,67 @@
 
   // ── Cart persistence ──────────────────────────────────────────────────────
 
-  function getCartToken() {
+  /**
+   * Returns the shopper's REAL, DURABLE Shopify cart token.
+   *
+   * IMPORTANT: this deliberately uses POST /cart/update.js with a no-op
+   * payload, NOT GET /cart.js. On a cart that has no items yet (the normal
+   * case here, since the customer uploads a file BEFORE clicking "Add to
+   * cart"), a read-only GET /cart.js can return a token that is not yet
+   * Shopify's final, persisted cart identity — Shopify only durably commits
+   * to a cart once it's actually mutated. That provisional token then never
+   * matches order.cart_token from the orders/create webhook later, even
+   * though it looked like a perfectly valid token at the time.
+   *
+   * POSTing a harmless empty update forces Shopify to instantiate (or
+   * confirm) the real, persistent cart right now and returns that cart's
+   * actual token — the same one that will end up on the resulting order.
+   */
+  async function getCartToken() {
+    if (_cachedCartToken) return _cachedCartToken;
+    try {
+      const res = await fetch('/cart/update.js', {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: {} }),
+      });
+      if (res.ok) {
+        const cart = await res.json();
+        if (cart && cart.token) {
+          // Some store configurations still append "?key={checkoutKey}" to
+          // the token — strip it, since order.cart_token is always bare.
+          _cachedCartToken = String(cart.token).split('?')[0];
+          return _cachedCartToken;
+        }
+      }
+    } catch (e) { /* network hiccup — fall through */ }
+
+    // Fallback: try a plain GET, in case /cart/update.js is blocked by a
+    // theme customization or cart-mutation restriction. Better than
+    // nothing, though it carries the provisional-token risk described above.
+    try {
+      const res = await fetch('/cart.js', { credentials: 'same-origin', cache: 'no-store' });
+      if (res.ok) {
+        const cart = await res.json();
+        if (cart && cart.token) {
+          _cachedCartToken = String(cart.token).split('?')[0];
+          return _cachedCartToken;
+        }
+      }
+    } catch (e) { /* fall through to cookie */ }
+
+    // Last resort: read the cookie if Shopify has already set one.
+    // Deliberately no random-token fallback — an upload that can never be
+    // matched to an order is worse than one that stays unlinked and visible
+    // in "All Uploads" for manual reconciliation.
     const m = document.cookie.match(/cart=([^;]+)/);
-    return m ? decodeURIComponent(m[1]) : 'cart_' + Math.random().toString(36).substr(2, 9);
+    if (m) {
+      _cachedCartToken = decodeURIComponent(m[1]).split('?')[0];
+      return _cachedCartToken;
+    }
+    return null;
   }
 
   function persistUploadIds() {

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In, IsNull } from 'typeorm';
 import { Upload, UploadStatus } from '../uploads/entities/upload.entity';
 import { UploadField, AssignmentType } from '../uploads/entities/upload-field.entity';
 import { Merchant } from '../auth/entities/merchant.entity';
@@ -13,6 +13,7 @@ import { EmailService } from '../email/email.service';
 import { AppSettings } from '../admin/entities/app-settings.entity';
 import { v4 as uuid } from 'uuid';
 import { getImageDimensions } from '../common/utils/image-dimensions';
+import { buildDownloadFilename } from '../common/utils/download-filename.util';
 
 @Injectable()
 export class StorefrontService {
@@ -100,7 +101,19 @@ export class StorefrontService {
     if (!field || !field.enablePreview || !field.previewTemplateKey) {
       throw new NotFoundException('Preview template not found');
     }
-    const buffer = await this.storageService.getFileBuffer(field.previewTemplateKey);
+    let buffer: Buffer;
+    try {
+      buffer = await this.storageService.getFileBuffer(field.previewTemplateKey);
+    } catch (err: any) {
+      // Most likely cause: the object was deleted directly from the storage
+      // bucket (e.g. manual cleanup) while this field's DB record still
+      // references its key. Surface a clean 404 instead of letting the raw
+      // S3 NoSuchKey error bubble up as an unhandled 500.
+      this.logger.warn(
+        `Preview template file missing for field ${fieldId} (key: ${field.previewTemplateKey}): ${err?.message}`,
+      );
+      throw new NotFoundException('Preview template file is missing — please re-upload it in Upload Field settings');
+    }
     const ext = field.previewTemplateKey.split('.').pop() || 'jpg';
     const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
     return { buffer, mimeType };
@@ -196,14 +209,28 @@ export class StorefrontService {
 
   private async virusScanAsync(upload: Upload, merchant: Merchant) {
     await this.uploadRepo.update(upload.id, { status: UploadStatus.SCANNING });
-    const buffer = await this.storageService.getFileBuffer(upload.s3Key);
+    let buffer: Buffer;
+    try {
+      buffer = await this.storageService.getFileBuffer(upload.s3Key);
+    } catch (err: any) {
+      // Without this catch, any failure here (missing object, transient S3
+      // error, etc.) leaves the upload stuck showing "scanning" forever,
+      // since the outer .catch() in the caller only logs — it never updates
+      // the upload's status to a terminal state.
+      this.logger.error(`Virus scan could not read file for upload ${upload.id}: ${err?.message}`);
+      await this.uploadRepo.update(upload.id, {
+        status: UploadStatus.FAILED,
+        scanResult: 'File could not be read for scanning',
+      });
+      return;
+    }
     const { isClean, virusName } = await this.securityService.scanForViruses(buffer);
 
     if (isClean) {
       await this.uploadRepo.update(upload.id, { status: UploadStatus.CLEAN, scanResult: 'clean' });
       const settings = await this.settingsRepo.findOne({ where: { merchantId: merchant.id } });
       if (settings?.notifyMerchantOnUpload) {
-        const url = await this.storageService.getSignedDownloadUrl(upload.s3Key, upload.originalFileName);
+        const url = await this.storageService.getSignedDownloadUrl(upload.s3Key, buildDownloadFilename(upload));
         await this.emailService.sendMerchantUploadNotification({
           merchantEmail: settings.notificationEmail || merchant.shopEmail,
           shopName: merchant.shopName || merchant.shopDomain,
@@ -224,8 +251,49 @@ export class StorefrontService {
     const upload = await this.uploadRepo.findOne({ where: { id: uploadId, merchantId, cartToken, deletedAt: null } });
     if (!upload) throw new NotFoundException('Upload not found');
     if (upload.orderId) throw new ForbiddenException('Cannot remove after order placed');
-    await this.storageService.deleteFile(upload.s3Key);
+    // Soft-delete the DB record regardless of whether the storage delete
+    // succeeds — a missing object shouldn't block the customer from
+    // removing an upload from their cart (e.g. it was already cleaned up
+    // manually), and this stays consistent with the other delete call
+    // sites in the codebase which already tolerate this.
+    await this.storageService.deleteFile(upload.s3Key).catch((err: any) => {
+      this.logger.warn(`Could not delete storage object for upload ${uploadId}: ${err?.message}`);
+    });
     await this.uploadRepo.update(uploadId, { deletedAt: new Date() });
+  }
+
+  /**
+   * Re-binds one or more uploads to the cart's final, durable token, called
+   * by the widget right after it detects a successful Add to Cart. See the
+   * controller's doc comment for why this is necessary.
+   *
+   * Scoped defensively: only touches uploads that (a) belong to this
+   * merchant, (b) haven't already been linked to an order, and (c) — when
+   * oldCartToken is provided — currently carry that specific provisional
+   * token, so this can never accidentally reassign someone else's upload.
+   */
+  async rebindCartToken(
+    shopOrMerchantId: string,
+    uploadIds: string[],
+    oldCartToken: string | undefined,
+    newCartToken: string,
+  ): Promise<{ updated: number }> {
+    const merchantId = await this.resolveMerchantId(shopOrMerchantId);
+
+    const where: any = {
+      id: In(uploadIds),
+      merchantId,
+      orderId: IsNull(),
+      deletedAt: IsNull(),
+    };
+    if (oldCartToken) where.cartToken = oldCartToken;
+
+    const result = await this.uploadRepo.update(where, { cartToken: newCartToken });
+    const updated = result.affected || 0;
+    this.logger.log(
+      `Rebound ${updated} upload(s) from cartToken "${oldCartToken}" to "${newCartToken}" for merchant ${merchantId}`,
+    );
+    return { updated };
   }
 
   private async checkPlanLimits(merchant: Merchant) {
@@ -234,9 +302,20 @@ export class StorefrontService {
       ? await this.planRepo.findOne({ where: { id: sub.planId } })
       : await this.planRepo.findOne({ where: { name: PlanName.FREE } });
     if (!plan) return;
-    if (plan.uploadsPerMonth !== -1 && merchant.monthlyUploads >= plan.uploadsPerMonth)
-      throw new ForbiddenException(`Monthly upload limit of ${plan.uploadsPerMonth} reached`);
-    if (Number(merchant.storageUsedBytes) >= Number(plan.storageBytes))
-      throw new ForbiddenException('Storage limit reached');
+    // These are shown directly to the SHOPPER on the storefront (not the
+    // merchant), so they deliberately don't mention plan names or specific
+    // limit numbers — that's internal merchant billing detail a customer
+    // has no reason to see. The technical detail is still logged for the
+    // merchant/support to diagnose from server logs if needed.
+    if (plan.uploadsPerMonth !== -1 && merchant.monthlyUploads >= plan.uploadsPerMonth) {
+      this.logger.warn(
+        `Upload blocked for merchant ${merchant.id}: monthly limit of ${plan.uploadsPerMonth} reached (plan: ${plan.displayName})`,
+      );
+      throw new ForbiddenException('This store is not accepting new uploads right now. Please try again later.');
+    }
+    if (Number(merchant.storageUsedBytes) >= Number(plan.storageBytes)) {
+      this.logger.warn(`Upload blocked for merchant ${merchant.id}: storage limit reached (plan: ${plan.displayName})`);
+      throw new ForbiddenException('This store is not accepting new uploads right now. Please try again later.');
+    }
   }
 }

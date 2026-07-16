@@ -54,6 +54,11 @@ export function DashboardPage() {
     queryFn: () => api.get('/dashboard/recent-uploads').then((r) => r.data.data),
   });
 
+  const { data: storageGrowthData } = useQuery({
+    queryKey: ['dashboard', 'storage-growth'],
+    queryFn: () => api.get('/dashboard/storage-growth').then((r) => r.data.data),
+  });
+
   if (statsLoading) {
     return (
       <Page title="Dashboard">
@@ -135,6 +140,9 @@ export function DashboardPage() {
           <Card>
             <div style={{ padding: '20px' }}>
               <Text variant="headingMd" as="h2">Monthly Uploads</Text>
+              <Text variant="bodySm" tone="subdued" as="p">
+                Files currently on record per month — may differ from the "This Month" total above if any uploads were later deleted
+              </Text>
               <div style={{ marginTop: '16px', height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={monthlyData ?? []}>
@@ -157,14 +165,14 @@ export function DashboardPage() {
               <Text variant="headingMd" as="h2">Storage Growth (Last 30 Days)</Text>
               <div style={{ marginTop: '16px', height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={dailyData ?? []}>
+                  <AreaChart data={storageGrowthData ?? []}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => formatBytes(v, 0)} />
+                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => formatBytes(v, 1)} />
                     <Tooltip formatter={(v: number) => formatBytes(v)} />
                     <Area
                       type="monotone"
-                      dataKey="totalBytes"
+                      dataKey="bytes"
                       name="Storage"
                       stroke="#5c6ac4"
                       fill="#f4f5fa"
