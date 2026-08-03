@@ -7,6 +7,7 @@ import { Plan, PlanName } from '../plans/entities/plan.entity';
 import { Merchant } from '../auth/entities/merchant.entity';
 import { AppSettings } from '../admin/entities/app-settings.entity';
 import { ShopifyTokenService } from '../shopify-token/shopify-token.service';
+import { decideTestCharge } from './dev-store.util';
 
 @Injectable()
 export class BillingService {
@@ -75,13 +76,26 @@ export class BillingService {
     }
 
     const trialDays = await this.getDefaultTrialDays();
-    // Global env override still works (e.g. for staging), OR automatically
-    // for any merchant we detected as a development store at install time —
-    // Shopify would reject a real charge against them anyway, but marking
-    // it explicitly lets them actually test the upgrade flow instead of
-    // hitting a confusing billing error.
-    const isTestCharge = process.env.SHOPIFY_BILLING_TEST_MODE === 'true' || merchant.isDevelopmentStore;
     const accessToken = await this.shopifyTokenService.getValidAccessToken(merchant);
+
+    // Decide test-vs-live per shop, at charge time, by asking Shopify whether
+    // this is a development store (shop.plan.partnerDevelopment) rather than
+    // trusting the plan-name string captured at install. A development store
+    // can never hold a payment method, so a LIVE charge against one makes
+    // Shopify redirect the merchant to Settings → Billing to add a card and
+    // the flow dead-ends at admin.shopify.com/login?...errorHint=client_api_error.
+    // The env override (SHOPIFY_BILLING_TEST_MODE=true) still forces test mode.
+    const chargeDecision = await decideTestCharge({
+      shopDomain: merchant.shopDomain,
+      accessToken,
+      storedIsDevelopmentStore: merchant.isDevelopmentStore,
+      storedPlanName: merchant.shopPlanName,
+    });
+    const isTestCharge = chargeDecision.test;
+    this.logger.log(
+      `Creating ${isTestCharge ? 'TEST' : 'LIVE'} charge for ${merchant.shopDomain} ` +
+        `(plan: ${plan.displayName}, reason: ${chargeDecision.reason})`,
+    );
 
     // Ask Shopify itself to create the subscription and hand back a real,
     // signed confirmation URL. We must never build this URL ourselves —
@@ -175,11 +189,12 @@ export class BillingService {
 
     // Record a pending subscription so /billing/activate has something to
     // promote to ACTIVE once the merchant approves the charge and Shopify
-    // redirects back to returnUrl.
-    await this.subRepo.update(
-      { merchantId: merchant.id, status: SubscriptionStatus.ACTIVE },
-      { status: SubscriptionStatus.CANCELLED },
-    );
+    // redirects back to returnUrl. Deliberately does NOT touch the
+    // merchant's current ACTIVE subscription yet — cancelling it here,
+    // before the merchant has even seen Shopify's approval screen, meant
+    // that declining or abandoning the upgrade left the merchant with no
+    // active plan at all. The old plan is only cancelled once the new one
+    // is confirmed active, in activateSubscription() below.
     const pending = this.subRepo.create({
       merchantId: merchant.id,
       planId: plan.id,
@@ -236,14 +251,38 @@ export class BillingService {
     }
 
     const activeSubs = response.data?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-    const matched = activeSubs.find((s: any) => s.id === sub.shopifyChargeId)
-      ?? (activeSubs.length === 1 ? activeSubs[0] : null);
+    // Only an EXACT id match counts as confirmation that Shopify approved
+    // THIS specific pending request. The previous code fell back to
+    // "if there's exactly one active subscription, assume it's ours" when
+    // no exact match was found — but the merchant's PREVIOUS plan is often
+    // still genuinely active on Shopify's side at this point (we no longer
+    // cancel it until here), so that fallback was wrongly treating "the
+    // old plan is still active" as "the new plan was approved," silently
+    // promoting a pending request the merchant had actually declined or
+    // abandoned.
+    const matched = activeSubs.find((s: any) => s.id === sub.shopifyChargeId);
 
     if (!matched) {
-      // Merchant likely declined the charge — leave the row as PENDING
-      // rather than guessing; a future check or webhook can clean it up.
+      // Merchant declined the charge, abandoned it, or it's not confirmed
+      // yet — leave the row as PENDING rather than guessing. The
+      // merchant's previous plan (if any) is untouched and remains active.
       return { success: false, reason: 'Subscription not yet active on Shopify' };
     }
+
+    // Now that the NEW subscription is genuinely confirmed, cancel
+    // whatever the merchant was previously on — both the real Shopify
+    // charge (so they're not being billed for two plans) and our local
+    // record of it.
+    const previousActive = await this.subRepo.findOne({
+      where: { merchantId, status: SubscriptionStatus.ACTIVE },
+    });
+    if (previousActive && previousActive.shopifyChargeId && previousActive.shopifyChargeId !== matched.id) {
+      await this.cancelShopifySubscription(merchant, previousActive.shopifyChargeId);
+    }
+    await this.subRepo.update(
+      { merchantId, status: SubscriptionStatus.ACTIVE },
+      { status: SubscriptionStatus.CANCELLED },
+    );
 
     await this.subRepo.update(sub.id, {
       status: SubscriptionStatus.ACTIVE,
@@ -253,6 +292,42 @@ export class BillingService {
     });
 
     return { success: true };
+  }
+
+  /** Cancels a subscription on Shopify's side via appSubscriptionCancel. */
+  private async cancelShopifySubscription(merchant: Merchant, shopifySubscriptionId: string): Promise<void> {
+    try {
+      const accessToken = await this.shopifyTokenService.getValidAccessToken(merchant);
+      const mutation = `
+        mutation AppSubscriptionCancel($id: ID!) {
+          appSubscriptionCancel(id: $id) {
+            userErrors { field message }
+            appSubscription { id status }
+          }
+        }
+      `;
+      const res = await axios.post(
+        `https://${merchant.shopDomain}/admin/api/2026-07/graphql.json`,
+        { query: mutation, variables: { id: shopifySubscriptionId } },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15_000,
+        },
+      );
+      const errors = res.data?.data?.appSubscriptionCancel?.userErrors;
+      if (errors?.length) {
+        this.logger.warn(`appSubscriptionCancel userErrors for ${merchant.shopDomain}: ${JSON.stringify(errors)}`);
+      }
+    } catch (err: any) {
+      // Non-fatal: the new subscription still activates even if cancelling
+      // the old one fails here — worst case Shopify's own dashboard shows
+      // two charges briefly, which the merchant or support can reconcile,
+      // rather than blocking their upgrade entirely.
+      this.logger.error(`Failed to cancel previous Shopify subscription for ${merchant.shopDomain}: ${err?.message}`);
+    }
   }
 
   async activateFreePlan(merchantId: string) {
