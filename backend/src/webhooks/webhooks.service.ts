@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In, IsNull, Between } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Upload } from '../uploads/entities/upload.entity';
@@ -8,6 +8,7 @@ import { Merchant } from '../auth/entities/merchant.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ProductsService } from '../products/products.service';
 import { ShopifyTokenService } from '../shopify-token/shopify-token.service';
+import { OrderFilesService } from '../orders/order-files.service';
 
 @Injectable()
 export class WebhooksService {
@@ -22,6 +23,7 @@ export class WebhooksService {
     private readonly productsService: ProductsService,
     private readonly configService: ConfigService,
     private readonly shopifyTokenService: ShopifyTokenService,
+    private readonly orderFilesService: OrderFilesService,
   ) {}
 
   /**
@@ -42,6 +44,14 @@ export class WebhooksService {
     // Register via both REST (per-merchant) and GraphQL (app-level subscriptions)
     await this.registerViaRest(merchant, appUrl, accessToken);
     await this.registerViaGraphQL(merchant, appUrl, accessToken);
+
+    // Create the order metafield definition up front so uploaded files show
+    // on Shopify's native Order page as soon as the first order comes in,
+    // rather than waiting on OrderFilesService to lazily create it on the
+    // fly. Best-effort — attachUploadsToOrder() re-attempts this per shop
+    // anyway if it didn't land here (e.g. merchant installed before this
+    // existed).
+    await this.orderFilesService.ensureOrderMetafieldDefinition(merchant.shopDomain, accessToken);
   }
 
   private async registerViaRest(merchant: Merchant, appUrl: string, accessToken: string): Promise<void> {
@@ -304,33 +314,38 @@ export class WebhooksService {
       return;
     }
 
-    const cartToken = order.cart_token;
     const shopifyOrderId = String(order.id);
     const orderId = String(order.order_number ?? order.id);
 
-    if (!cartToken) {
-      this.logger.warn(
-        `orders/create webhook for #${orderId} (${shopDomain}) had no cart_token — cannot check for uploads to link.`,
-      );
-      return;
-    }
-
-    const uploads = await this.uploadRepo.find({
-      where: { merchantId: merchant.id, cartToken },
-    });
+    // Resolve which of this merchant's uploads belong to this order.
+    //
+    // This USED to match ONLY on order.cart_token, and that is exactly what
+    // was breaking customised images. Shopify sends cart_token = null for a
+    // large share of real orders — anything paid through an offsite/express
+    // gateway (PayPal, Shop Pay, Apple/Google Pay) and many "Buy it now"
+    // flows. When cart_token was null (or a provisional token that never
+    // matched), the upload never received an orderId, so it disappeared from
+    // Filedrop's Orders view AND never got pushed onto the native Shopify
+    // order page.
+    //
+    // We now resolve uploads from the identifiers the theme widget already
+    // attaches to every order (cart attribute `_cfup_upload_ids` → order
+    // note_attributes, and the preview URL in each line item's properties),
+    // and only fall back to cart_token last. See resolveUploadsForOrder().
+    const { uploads, lineItemIdByUpload } = await this.resolveUploadsForOrder(
+      merchant.id,
+      order,
+    );
 
     if (!uploads.length) {
-      // Not necessarily a bug — most orders have no upload at all. But if this
-      // fires for an order you KNOW had a file uploaded first, the cartToken
-      // captured at upload time didn't match order.cart_token, which is
-      // exactly the failure mode the /cart.js fix in the theme widget
-      // addresses (see upload-widget.liquid getCartToken()).
-      //
-      // Uses .log() not .debug(): main.ts only enables ['error','warn','log']
-      // levels, so .debug() here would be silently swallowed and this branch
-      // would be invisible in production logs even when it fires.
+      // Most orders legitimately have no upload. If this fires for an order
+      // you KNOW had a customised file, inspect the logged identifiers below —
+      // it means none of note_attributes / line-item properties / cart_token
+      // pointed at a still-unlinked upload for this merchant.
       this.logger.log(
-        `ℹ️  No uploads found matching cartToken for order #${orderId} (${shopDomain}). cartToken from webhook: ${cartToken}`,
+        `ℹ️  No Filedrop uploads resolved for order #${orderId} (${shopDomain}). ` +
+          `cart_token=${order.cart_token ?? 'null'}; ` +
+          `note_attributes=${JSON.stringify(order.note_attributes ?? [])}`,
       );
       return;
     }
@@ -345,22 +360,266 @@ export class WebhooksService {
       },
     );
 
+    // Best-effort: record which specific line item each upload belongs to, so
+    // the customised image can later be shown against the correct product line.
+    for (const u of uploads) {
+      const lineItemId = lineItemIdByUpload.get(u.id);
+      if (lineItemId) {
+        await this.uploadRepo.update(u.id, { lineItemId: String(lineItemId) });
+      }
+    }
+
     this.logger.log(
-      `Associated ${uploads.length} uploads with order #${orderId} (${shopDomain})`,
+      `Associated ${uploads.length} upload(s) with order #${orderId} (${shopDomain})`,
     );
 
     // Add Shopify order timeline entry
     await this.addOrderTimelineNote(merchant, order.id, uploads.length);
 
-    // In-app notification
+    // In-app notification (fast, local DB write)
     await this.notificationsService.notifyUpload(merchant.id, {
       fileName: uploads.length > 1 ? `${uploads.length} files` : uploads[0].originalFileName,
       orderNumber: orderId,
       customerEmail: order.email,
     });
+
+    // Push the actual files onto the Shopify order so the merchant can preview
+    // and download them directly from the order page (native Metafields card).
+    //
+    // Deliberately NOT awaited: pushing bytes to Shopify Files and then waiting
+    // for image processing to reach READY can take several seconds, which would
+    // risk this webhook exceeding Shopify's response window and being retried.
+    // The uploads are already linked above, so this safely completes in the
+    // background. attachUploadsToOrder is best-effort and never throws.
+    void this.orderFilesService
+      .attachUploadsToOrder(merchant, shopifyOrderId, uploads)
+      .catch((e) =>
+        this.logger.error(`Background attachUploadsToOrder failed: ${e?.message}`),
+      );
+  }
+
+  /**
+   * Work out which of a merchant's uploads belong to a just-created order,
+   * using the most reliable signals first and cart_token only as a fallback.
+   *
+   * Strategy order:
+   *   1. Cart attribute `_cfup_upload_ids` — the widget writes this on every
+   *      upload (persistUploadIds() in upload-widget.liquid). Cart attributes
+   *      surface on the order as `note_attributes`, and unlike cart_token they
+   *      survive offsite/express checkouts. Durable path.
+   *   2. Line-item properties — the widget also writes the file's preview URL
+   *      as `properties[Uploaded file]` on the product line. The upload id is
+   *      embedded in that URL (/storefront/file/{id}). Parsing it resolves the
+   *      upload AND tells us which line item it belongs to.
+   *   3. cart_token — the original behaviour, kept as a last resort for the
+   *      orders that actually do carry a matching token.
+   *
+   * Every candidate id is re-checked against the DB scoped to this merchant and
+   * to uploads not yet linked to an order, so a stale/forged value in
+   * note_attributes can never attach someone else's file to this order.
+   */
+  private async resolveUploadsForOrder(
+    merchantId: string,
+    order: any,
+  ): Promise<{ uploads: Upload[]; lineItemIdByUpload: Map<string, string> }> {
+    const lineItemIdByUpload = new Map<string, string>();
+    const candidateIds = new Set<string>();
+
+    // (1) note_attributes (from the `_cfup_upload_ids` cart attribute)
+    for (const id of this.extractUploadIdsFromNoteAttributes(order)) {
+      candidateIds.add(id);
+    }
+
+    // (2) line-item properties (preview URL contains the upload id)
+    for (const { uploadId, lineItemId } of this.extractUploadRefsFromLineItems(order)) {
+      candidateIds.add(uploadId);
+      if (lineItemId) lineItemIdByUpload.set(uploadId, lineItemId);
+    }
+
+    let uploads: Upload[] = [];
+
+    if (candidateIds.size) {
+      uploads = await this.uploadRepo.find({
+        where: {
+          id: In([...candidateIds]),
+          merchantId,
+          orderId: IsNull(),
+          deletedAt: IsNull(),
+        },
+      });
+    }
+
+    // (3) Fallback: cart_token, only if the reliable paths found nothing.
+    if (!uploads.length && order.cart_token) {
+      uploads = await this.uploadRepo.find({
+        where: {
+          merchantId,
+          cartToken: String(order.cart_token).split('?')[0],
+          orderId: IsNull(),
+          deletedAt: IsNull(),
+        },
+      });
+    }
+
+    // (4) LAST-RESORT heuristic: link by product + time + (preferably) email.
+    //
+    // Some checkout paths strip EVERYTHING our widget attaches: "Buy it now",
+    // Shop Pay and the other dynamic/express buttons send no line-item
+    // properties and no cart attributes, and the order's cart_token won't match
+    // the provisional token captured before checkout. In that case none of
+    // (1)-(3) can fire, and the customised image would silently never link —
+    // which is exactly the empty-metafield / missing-from-Orders symptom.
+    //
+    // The upload row already stores productId, variantId, customerEmail and
+    // createdAt, and the order gives us the same facts, so we can still match:
+    // the most recent still-unlinked upload(s) for THIS merchant, for a product
+    // that's actually in THIS order, created shortly before it. We prefer an
+    // email match and only fall back to product+time when the upload carries no
+    // email (the common case, since shoppers upload before entering one).
+    if (!uploads.length) {
+      uploads = await this.resolveUploadsByHeuristic(merchantId, order);
+      if (uploads.length) {
+        this.logger.warn(
+          `⚠️  Linked ${uploads.length} upload(s) to order ${order.id} via LAST-RESORT ` +
+            `product/time heuristic (no cart_token / properties / note_attributes matched). ` +
+            `This is expected for Buy-it-now / Shop Pay checkouts.`,
+        );
+      }
+    }
+
+    return { uploads, lineItemIdByUpload };
+  }
+
+  /**
+   * Heuristic matcher — see caller. Deliberately conservative:
+   *   • same merchant, not yet linked to any order, not deleted
+   *   • productId is one of the products actually on this order
+   *   • createdAt within a window ending at the order time (never after it)
+   *   • if the upload has a customerEmail, it must equal the order's email
+   * Returns at most one upload per matching product line (the newest), so a
+   * single order can't vacuum up every unrelated upload for a popular product.
+   */
+  private async resolveUploadsByHeuristic(
+    merchantId: string,
+    order: any,
+  ): Promise<Upload[]> {
+    const lineItems: any[] = Array.isArray(order?.line_items) ? order.line_items : [];
+    const productIds = Array.from(
+      new Set(
+        lineItems
+          .map((li) => (li?.product_id != null ? String(li.product_id) : null))
+          .filter((v): v is string => !!v),
+      ),
+    );
+    if (!productIds.length) return [];
+
+    // Window: from HEURISTIC_WINDOW_HOURS before the order, up to the order
+    // time plus a small buffer for clock skew. Never match uploads created
+    // after the order was placed.
+    const HEURISTIC_WINDOW_HOURS = 12;
+    const orderTime = order?.created_at ? new Date(order.created_at) : new Date();
+    const windowStart = new Date(orderTime.getTime() - HEURISTIC_WINDOW_HOURS * 3600_000);
+    const windowEnd = new Date(orderTime.getTime() + 10 * 60_000);
+
+    const candidates = await this.uploadRepo.find({
+      where: {
+        merchantId,
+        productId: In(productIds),
+        orderId: IsNull(),
+        deletedAt: IsNull(),
+        createdAt: Between(windowStart, windowEnd),
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!candidates.length) return [];
+
+    const orderEmail = (order?.email || '').trim().toLowerCase();
+
+    // Keep the newest still-unlinked upload per product, honouring the email
+    // constraint when the upload actually has one.
+    const pickedByProduct = new Map<string, Upload>();
+    for (const u of candidates) {
+      if (!u.productId || pickedByProduct.has(u.productId)) continue;
+      if (u.customerEmail && orderEmail && u.customerEmail.trim().toLowerCase() !== orderEmail) {
+        continue; // email present on both and they disagree → not this shopper
+      }
+      pickedByProduct.set(u.productId, u);
+    }
+
+    return [...pickedByProduct.values()];
+  }
+
+  /** Pull upload ids out of the `_cfup_upload_ids` order note attribute. */
+  private extractUploadIdsFromNoteAttributes(order: any): string[] {
+    const attrs: Array<{ name?: string; value?: string }> = Array.isArray(
+      order?.note_attributes,
+    )
+      ? order.note_attributes
+      : [];
+    const entry = attrs.find((a) => a?.name === '_cfup_upload_ids');
+    if (!entry?.value) return [];
+    return String(entry.value)
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  /**
+   * Pull { uploadId, lineItemId } pairs out of the order's line-item
+   * properties. The widget stores the file's preview URL, which contains the
+   * upload id as /storefront/file/{uuid}. Also tolerates a bare uuid value.
+   */
+  private extractUploadRefsFromLineItems(
+    order: any,
+  ): Array<{ uploadId: string; lineItemId?: string }> {
+    const refs: Array<{ uploadId: string; lineItemId?: string }> = [];
+    const uuidRe =
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const lineItems: any[] = Array.isArray(order?.line_items)
+      ? order.line_items
+      : [];
+
+    const uuidReGlobal = new RegExp(uuidRe.source, 'gi');
+
+    for (const li of lineItems) {
+      const props: any[] = Array.isArray(li?.properties) ? li.properties : [];
+      const lineItemId = li?.id ? String(li.id) : undefined;
+      for (const p of props) {
+        const value = typeof p?.value === 'string' ? p.value : '';
+        if (!value) continue;
+        // A single value may carry one upload id (preview URL) or several
+        // (a combined "_Filedrop Upload IDs" property), so collect them all.
+        const matches = value.match(uuidReGlobal);
+        if (!matches) continue;
+        for (const m of matches) {
+          refs.push({ uploadId: m.toLowerCase(), lineItemId });
+        }
+      }
+    }
+    return refs;
   }
 
   async handleOrderUpdate(shopDomain: string, order: any): Promise<void> {
+    const merchant = await this.merchantRepo.findOne({ where: { shopDomain } });
+    if (!merchant) return;
+
+    // Recovery: if this order has linked Filedrop uploads but its file card is
+    // still empty (e.g. the original push happened before the file finished
+    // processing, or hit a transient error), re-attach them now. Guarded by an
+    // emptiness check inside attachUploadsIfMissing so orders that are already
+    // fine are left untouched and no duplicate files are created.
+    const shopifyOrderId = String(order.id);
+    const uploads = await this.uploadRepo.find({
+      where: { merchantId: merchant.id, shopifyOrderId, deletedAt: IsNull() },
+    });
+    if (uploads.length) {
+      void this.orderFilesService
+        .attachUploadsIfMissing(merchant, shopifyOrderId, uploads)
+        .catch((e) =>
+          this.logger.error(`orders/updated re-attach failed: ${e?.message}`),
+        );
+    }
+
     this.logger.log(`Order updated: ${order.id} on ${shopDomain}`);
   }
 

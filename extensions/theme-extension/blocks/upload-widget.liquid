@@ -6,7 +6,7 @@
 <div
   id="cfup-upload-widget"
   class="cfup-widget"
-  data-shop="{{ shop.domain }}"
+  data-shop="{{ shop.permanent_domain }}"
   data-product-id="{{ product.id }}"
   data-variant-id="{{ product.selected_or_first_available_variant.id }}"
   data-product-image="{{ product.selected_or_first_available_variant.featured_image | default: product.featured_image | image_url: width: 1600 }}"
@@ -15,6 +15,8 @@
   data-button-text="{{ block.settings.button_text }}"
   data-border-radius="{{ block.settings.border_radius }}"
   data-enable-camera="{{ block.settings.enable_camera }}"
+  data-cart-url="{{ routes.cart_url }}"
+  data-cart-update-url="{{ routes.cart_update_url }}"
 >
   <div id="cfup-fields-container"></div>
 </div>
@@ -90,9 +92,9 @@
 
 
 
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js" defer></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" defer></script>
+<!-- Cropper.js and Fabric.js are loaded on demand (see loadScriptOnce) only when
+     the optional image editor/designer is opened, so they no longer download on
+     every storefront page load. -->
 
 <style>
   :root {
@@ -116,6 +118,19 @@
   }
 
   .cfup-field-label .cfup-required { color: #cc0000; margin-left: 2px; }
+
+  .cfup-required-msg {
+    color: #cc0000;
+    font-size: 14px;
+    line-height: 1.4;
+    margin: 10px 0 0;
+    font-weight: 500;
+  }
+  .cfup-disabled {
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+  }
 
   .cfup-field-description {
     font-size: 13px;
@@ -292,6 +307,12 @@
   const widget = document.getElementById('cfup-upload-widget');
   if (!widget) return;
 
+  // Guard against the block being initialized more than once on a page
+  // (duplicate placement, or a theme re-rendering the section) — otherwise the
+  // script would double-bind listeners and append duplicate fields.
+  if (widget.dataset.cfupInit === '1') return;
+  widget.dataset.cfupInit = '1';
+
   const SHOP         = widget.dataset.shop;
   const PRODUCT_ID   = widget.dataset.productId;
   let   PRODUCT_IMAGE = widget.dataset.productImage || '';
@@ -301,9 +322,78 @@
   const ENABLE_CAMERA = widget.dataset.enableCamera === 'true';
   const container    = document.getElementById('cfup-fields-container');
 
+  // Shopify cart routes, resolved by Liquid so they carry any subfolder/locale
+  // prefix (e.g. "/en/cart", or "/app/cart" on a subfolder storefront). Using
+  // these instead of hard-coded "/cart.js" keeps cart-token binding and
+  // line-item properties working on custom-domain AND subfolder setups. The
+  // "/cart" fallbacks cover any theme that doesn't expose routes.
+  const CART_BASE        = widget.dataset.cartUrl || '/cart';
+  const CART_UPDATE_BASE = widget.dataset.cartUpdateUrl || '/cart/update';
+  const CART_JS_URL      = CART_BASE + '.js';
+  const CART_UPDATE_URL  = CART_UPDATE_BASE + '.js';
+
+  // Fail loudly in the console instead of silently rendering nothing — these
+  // are the two most common "the widget doesn't show up" causes.
+  if (!API_URL) {
+    console.error('[Filedrop] No App API URL is set on the Filedrop block. Open the theme editor, select the Filedrop block, and set "App API URL". The widget cannot load without it.');
+    return;
+  }
+  if (!SHOP) {
+    console.error('[Filedrop] Could not determine the shop domain. The widget cannot load.');
+    return;
+  }
+
+  // ── Lazy-load heavy image libraries only when actually needed ─────────────
+  // Cropper.js and Fabric.js power the OPTIONAL image editor/designer. Loading
+  // them on every product page (for every shopper) slowed the storefront for no
+  // reason, so they're fetched on first use. Each loader resolves true when the
+  // library is ready, false if the CDN is blocked/offline — callers then fall
+  // back gracefully (upload the original file) instead of breaking.
+  const CROPPER_JS  = 'https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js';
+  const CROPPER_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css';
+  const FABRIC_JS   = 'https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js';
+  const _scriptCache = {};
+  function loadScriptOnce(src) {
+    if (_scriptCache[src]) return _scriptCache[src];
+    _scriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = () => resolve(true);
+      s.onerror = () => { delete _scriptCache[src]; reject(new Error('load failed: ' + src)); };
+      document.head.appendChild(s);
+    });
+    return _scriptCache[src];
+  }
+  function ensureCss(href) {
+    if (document.querySelector('link[data-cfup-css="' + href + '"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = href;
+    l.setAttribute('data-cfup-css', href);
+    document.head.appendChild(l);
+  }
+  async function ensureCropper() {
+    if (window.Cropper) return true;
+    ensureCss(CROPPER_CSS);
+    try { await loadScriptOnce(CROPPER_JS); return !!window.Cropper; }
+    catch (e) { console.error('[Filedrop] Image editor library failed to load.', e); return false; }
+  }
+  async function ensureFabric() {
+    if (window.fabric) return true;
+    try { await loadScriptOnce(FABRIC_JS); return !!window.fabric; }
+    catch (e) { console.error('[Filedrop] Image designer library failed to load.', e); return false; }
+  }
+
   widget.style.setProperty('--cfup-btn-color', BTN_COLOR);
 
   let allUploadedIds = [];
+  // Per-required-field upload counters, rebuilt whenever fields (re)load. Used
+  // to gate Add-to-Cart until every required field has at least one upload.
+  const requiredFieldGetters = [];
+  // Preview URLs for each uploaded file, written as Shopify line-item
+  // properties so the image shows directly under the product on the order.
+  let allUploadedPreviews = [];
   let cropper = null;
   let pendingEditorCallback = null;
   // Cached cart token for the lifetime of this page load — avoids
@@ -323,7 +413,7 @@
     if (!allUploadedIds.length) return;
     const oldToken = _cachedCartToken;
     try {
-      const res = await fetch('/cart.js', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fetch(CART_JS_URL, { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return;
       const cart = await res.json();
       const freshToken = cart && cart.token ? String(cart.token).split('?')[0] : null;
@@ -351,11 +441,24 @@
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
       const url = typeof input === 'string' ? input : (input && input.url);
+      const isCartAdd = looksLikeCartAdd(url) && (!init || !init.method || init.method.toUpperCase() === 'POST');
       const p = origFetch.apply(this, arguments);
-      if (looksLikeCartAdd(url) && (!init || !init.method || init.method.toUpperCase() === 'POST')) {
-        p.then((r) => { if (r.ok) setTimeout(rebindUploadsToRealCartToken, 300); }).catch(() => {});
-      }
-      return p;
+      if (!isCartAdd) return p;
+      // IMPORTANT: chain the rebind INTO the promise handed back to the
+      // theme's own code, rather than firing it separately on a delayed
+      // timer. Themes that do `fetch('/cart/add', ...).then(() =>
+      // location.href = '/checkout')` (no cart page/drawer step — an
+      // immediate redirect straight to checkout) will navigate the instant
+      // that promise resolves. A detached setTimeout(...,300) loses that
+      // race every time: the navigation tears down the page mid-flight and
+      // kills our pending rebind fetch before it can complete, silently
+      // leaving the upload bound to its stale cart token forever. Awaiting
+      // here makes the theme's own .then()-chained navigation wait for us
+      // instead — same resolved Response, just slightly later.
+      return p.then(async (r) => {
+        if (r.ok) { try { await rebindUploadsToRealCartToken(); } catch (e) {} }
+        return r;
+      });
     };
 
     const OrigXHR = window.XMLHttpRequest;
@@ -375,8 +478,37 @@
     document.addEventListener('submit', (e) => {
       const form = e.target;
       if (form && form.action && looksLikeCartAdd(form.action)) {
+        // Hard stop: don't let the product be added if a required upload is
+        // missing. Capture phase + stopImmediatePropagation so this wins even
+        // against the theme's own submit handlers.
+        if (requiredFieldGetters.length > 0 && !allRequiredSatisfied()) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          showGateMessage(true);
+          updateAddToCartGate();
+          return;
+        }
         rebindUploadsToRealCartToken();
       }
+    }, true);
+
+    // Safety net for themes whose Add-to-Cart / express buttons don't submit a
+    // <form> (AJAX carts, custom buttons, Shop Pay). Intercept the click in the
+    // capture phase before the theme's handler runs.
+    document.addEventListener('click', (e) => {
+      if (requiredFieldGetters.length === 0 || allRequiredSatisfied()) return;
+      const target = e.target.closest && e.target.closest(
+        'button[type="submit"], input[type="submit"], [name="add"], .product-form__submit, .add-to-cart, [data-add-to-cart], .shopify-payment-button, .shopify-payment-button button',
+      );
+      if (!target) return;
+      // Only intercept within a real cart/add context.
+      const inCartForm = target.closest('form[action*="/cart/add"]') || document.querySelector('form[action*="/cart/add"]');
+      const isExpress = target.closest('.shopify-payment-button');
+      if (!inCartForm && !isExpress) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      showGateMessage(true);
+      updateAddToCartGate();
     }, true);
   }
   watchForAddToCart();
@@ -411,10 +543,19 @@
   const modal      = document.getElementById('cfup-editor-modal');
   const editorImg  = document.getElementById('cfup-editor-img');
 
-  function openEditor(file, onDone) {
+  async function openEditor(file, onDone) {
+    // Load Cropper on demand. If it can't load (CDN blocked/offline), skip the
+    // editor and upload the original file rather than trapping the customer.
+    const ready = await ensureCropper();
+    if (!ready) {
+      console.warn('[Filedrop] Image editor unavailable — using the original image.');
+      onDone(file);
+      return;
+    }
     pendingEditorCallback = onDone;
     const url = URL.createObjectURL(file);
     editorImg.src = url;
+    editorImg.dataset.objurl = url;
     modal.style.display = 'flex';
 
     // Small delay so img loads before Cropper reads dimensions
@@ -432,9 +573,17 @@
     }, 100);
   }
 
+  function _revokeEditorUrl() {
+    if (editorImg.dataset.objurl) {
+      URL.revokeObjectURL(editorImg.dataset.objurl);
+      delete editorImg.dataset.objurl;
+    }
+  }
+
   document.getElementById('cfup-editor-close').addEventListener('click', () => {
     modal.style.display = 'none';
     if (cropper) { cropper.destroy(); cropper = null; }
+    _revokeEditorUrl();
     pendingEditorCallback = null;
   });
 
@@ -450,6 +599,7 @@
       modal.style.display = 'none';
       cropper.destroy();
       cropper = null;
+      _revokeEditorUrl();
       const editedFile = new File([blob], 'edited-image.jpg', { type: 'image/jpeg' });
       pendingEditorCallback(editedFile);
       pendingEditorCallback = null;
@@ -548,7 +698,15 @@
       (active && active.type === 'textbox') ? 'inline-block' : 'none';
   }
 
-  function openDesigner(templateUrl, initialPlacement, file, opts, onConfirm) {
+  async function openDesigner(templateUrl, initialPlacement, file, opts, onConfirm) {
+    // Load Fabric on demand. If it can't load (CDN blocked/offline), skip the
+    // designer and upload the original file rather than showing a broken modal.
+    const ready = await ensureFabric();
+    if (!ready) {
+      console.warn('[Filedrop] Image designer unavailable — using the original image.');
+      onConfirm(file);
+      return;
+    }
     pendingDesignerCallback = onConfirm;
     const modal = document.getElementById('cfup-designer-modal');
     modal.style.display = 'flex';
@@ -670,7 +828,112 @@
 
   // ── Fetch fields ─────────────────────────────────────────────────────────
 
+  /**
+   * Shopify's dynamic/express checkout buttons (Buy it now, Shop Pay,
+   * PayPal, Google Pay — anything rendered by the `payment_button` Liquid
+   * filter, always wrapped in a `.shopify-payment-button` div regardless of
+   * theme) are documented to skip cart attributes AND line-item properties.
+   * They never trigger a `/cart/add` our widget can see, so an uploaded
+   * file can never be linked back to an order placed through one of those
+   * buttons — no cart-token to rebind, no property to attach, nothing for
+   * the orders/create webhook to match. When this product has a REQUIRED
+   * upload field, hide those buttons so the customer is forced through
+   * "Add to cart" -> Checkout, the only flow this app can actually track.
+   * Restored (shown again) when no field on the current variant requires
+   * an upload, e.g. after a variant:changed swap.
+   */
+  function setExpressCheckoutVisible(visible) {
+    const form =
+      widget.closest('form[action*="/cart/add"]') ||
+      document.querySelector('form[action*="/cart/add"]');
+    const scope = form || document;
+    scope.querySelectorAll('.shopify-payment-button').forEach((el) => {
+      el.style.display = visible ? '' : 'none';
+    });
+  }
+
+  // ── Required-upload gating ────────────────────────────────────────────────
+  // A field marked "required" must have at least one successful upload before
+  // the product can be added to cart. Previously only the express-checkout
+  // buttons were hidden, so a shopper could still use the normal Add-to-Cart
+  // and check out with no file — leaving the merchant an order with no artwork.
+  function allRequiredSatisfied() {
+    return requiredFieldGetters.every((f) => f.getCount() > 0);
+  }
+
+  function getCartForms() {
+    const forms = new Set();
+    const near = widget.closest('form[action*="/cart/add"]');
+    if (near) forms.add(near);
+    document.querySelectorAll('form[action*="/cart/add"]').forEach((f) => forms.add(f));
+    return Array.from(forms);
+  }
+
+  function getAddToCartButtons() {
+    const btns = new Set();
+    getCartForms().forEach((form) => {
+      form
+        .querySelectorAll(
+          'button[type="submit"], input[type="submit"], [name="add"], .product-form__submit, .add-to-cart, [data-add-to-cart]',
+        )
+        .forEach((b) => btns.add(b));
+    });
+    return Array.from(btns);
+  }
+
+  function showGateMessage(show) {
+    let msg = document.getElementById('cfup-required-msg');
+    if (show) {
+      if (!msg) {
+        msg = document.createElement('div');
+        msg.id = 'cfup-required-msg';
+        msg.className = 'cfup-required-msg';
+        msg.setAttribute('role', 'alert');
+        msg.textContent = 'Please upload the required file(s) before adding to cart.';
+        (container.parentNode || container).insertBefore(msg, container.nextSibling);
+      }
+      msg.style.display = '';
+    } else if (msg) {
+      msg.style.display = 'none';
+    }
+  }
+
+  // Re-evaluate the gate. Called after every upload/removal and on (re)load.
+  function updateAddToCartGate() {
+    const hasRequired = requiredFieldGetters.length > 0;
+    const satisfied = allRequiredSatisfied();
+    const block = hasRequired && !satisfied;
+
+    // Express checkout stays hidden until required uploads are present.
+    setExpressCheckoutVisible(!block);
+
+    getAddToCartButtons().forEach((btn) => {
+      if (block) {
+        if (!btn.dataset.cfupGated) {
+          btn.dataset.cfupGated = '1';
+          // Remember whether the theme had already disabled it, so we only
+          // re-enable buttons that WE disabled.
+          btn.dataset.cfupWasDisabled = btn.disabled ? '1' : '0';
+        }
+        btn.disabled = true;
+        btn.classList.add('cfup-disabled');
+        btn.setAttribute('aria-disabled', 'true');
+      } else if (btn.dataset.cfupGated) {
+        if (btn.dataset.cfupWasDisabled !== '1') btn.disabled = false;
+        btn.classList.remove('cfup-disabled');
+        btn.removeAttribute('aria-disabled');
+        delete btn.dataset.cfupGated;
+        delete btn.dataset.cfupWasDisabled;
+      }
+    });
+
+    if (!block) showGateMessage(false);
+  }
+
   async function loadFields() {
+    // Rebuild the required-field registry from scratch on every (re)load,
+    // including variant changes.
+    requiredFieldGetters.length = 0;
     const variantId = widget.dataset.variantId;
     try {
       const url = new URL(`${API_URL}/storefront/fields`);
@@ -679,13 +942,27 @@
       if (variantId) url.searchParams.set('variantId', variantId);
 
       const res = await fetch(url.toString());
-      if (!res.ok) return;
+      if (!res.ok) {
+        // A 404 here almost always means the backend couldn't match this store
+        // (e.g. the widget sent a domain the merchant isn't registered under).
+        console.error(
+          `[Filedrop] Could not load upload fields (HTTP ${res.status}) for shop "${SHOP}". ` +
+          `If this is a live store, confirm the app is installed on it and the shop domain matches.`,
+        );
+        return;
+      }
       const json = await res.json();
       const fields = json.data || [];
+      if (!fields.length) {
+        console.info('[Filedrop] No active upload fields are assigned to this product. Create a field (or assign one store-wide) in the Filedrop admin.');
+      }
       fields.forEach((field) => container.appendChild(buildField(field)));
     } catch (e) {
       console.error('[CFUP] Failed to load upload fields:', e);
     }
+    // Apply the gate whether or not fields loaded (fail-open: if we couldn't
+    // load fields, there are no known required fields, so don't block).
+    updateAddToCartGate();
   }
 
   // Rebuild on variant change
@@ -707,6 +984,12 @@
   function buildField(field) {
     const uploadedFiles = [];
     const uploadedFileIds = [];
+
+    // Register required fields so the Add-to-Cart gate can check whether each
+    // one has at least one upload. The getter reads the live array length.
+    if (field.required) {
+      requiredFieldGetters.push({ id: field.id, getCount: () => uploadedFileIds.length });
+    }
 
     const wrapper = document.createElement('div');
     wrapper.className = 'cfup-field-wrapper';
@@ -753,7 +1036,14 @@
     fileInput.style.cssText = 'position:absolute;inset:0;opacity:0;cursor:pointer;';
     fileInput.multiple = field.maxFiles > 1;
     if (field.allowedExtensions?.length) {
-      fileInput.accept = field.allowedExtensions.map((e) => '.' + e).join(',');
+      var acceptExts = field.allowedExtensions.map(function (e) { return '.' + e; });
+      // iPhone photos are HEIC. They're converted to JPEG on the server, so a
+      // field that allows common image types should also let HEIC be picked.
+      var allowsImages = field.allowedExtensions.some(function (e) {
+        return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif'].indexOf(e.toLowerCase()) !== -1;
+      });
+      if (allowsImages) { acceptExts.push('.heic', '.heif'); }
+      fileInput.accept = acceptExts.join(',');
     } else if (field.fieldType === 'image') {
       fileInput.accept = 'image/*';
     }
@@ -917,7 +1207,13 @@
       }
 
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (field.allowedExtensions?.length && !field.allowedExtensions.includes(ext)) {
+      // Let iPhone HEIC through even on a "jpg/png only" field — the server
+      // converts it to JPEG, so it satisfies the merchant's image intent.
+      var heicOk = (ext === 'heic' || ext === 'heif') &&
+        field.allowedExtensions?.some(function (e) {
+          return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif'].indexOf(e.toLowerCase()) !== -1;
+        });
+      if (field.allowedExtensions?.length && !field.allowedExtensions.includes(ext) && !heicOk) {
         showError(`File type .${ext} is not allowed`);
         return;
       }
@@ -959,18 +1255,30 @@
               uploadedFiles.push(res.data);
               uploadedFileIds.push(res.data.id);
               allUploadedIds.push(res.data.id);
+              if (res.data.previewUrl) {
+                allUploadedPreviews.push(res.data.previewUrl);
+              }
               updateFileItem(fileItem, 'success', '✓ Uploaded');
               progressWrapper.style.display = 'none';
               addRemoveButton(fileItem, res.data.id, uploadedFiles, uploadedFileIds);
               persistUploadIds();
+              syncLineItemProperties();
               resolve(res);
             } else {
-              try {
-                const err = JSON.parse(xhr.responseText);
-                reject(new Error(err.message || 'Upload failed'));
-              } catch {
-                reject(new Error('Upload failed'));
+              let msg = 'Upload failed. Please try again.';
+              if (xhr.status === 413) {
+                msg = 'This file is too large to upload.';
+              } else if (xhr.status === 429) {
+                msg = 'Too many uploads in a short time. Please wait a moment and try again.';
+              } else {
+                try {
+                  const err = JSON.parse(xhr.responseText);
+                  if (err && err.message) {
+                    msg = Array.isArray(err.message) ? err.message.join(', ') : err.message;
+                  }
+                } catch { /* non-JSON error body — keep the generic message */ }
               }
+              reject(new Error(msg));
             }
           };
           xhr.onerror = () => reject(new Error('Network error'));
@@ -1001,9 +1309,13 @@
         const idx = idsArr.indexOf(uploadId);
         if (idx !== -1) { filesArr.splice(idx, 1); idsArr.splice(idx, 1); }
         const globalIdx = allUploadedIds.indexOf(uploadId);
-        if (globalIdx !== -1) allUploadedIds.splice(globalIdx, 1);
+        if (globalIdx !== -1) {
+          allUploadedIds.splice(globalIdx, 1);
+          allUploadedPreviews.splice(globalIdx, 1);
+        }
         item.remove();
         persistUploadIds();
+        syncLineItemProperties();
       });
       item.appendChild(btn);
     }
@@ -1021,6 +1333,7 @@
       const img = document.createElement('img');
       img.className = 'cfup-file-preview';
       img.src = URL.createObjectURL(file);
+      img.onload = () => URL.revokeObjectURL(img.src);
       item.appendChild(img);
     } else {
       const icon = document.createElement('span');
@@ -1090,7 +1403,7 @@
   async function getCartToken() {
     if (_cachedCartToken) return _cachedCartToken;
     try {
-      const res = await fetch('/cart/update.js', {
+      const res = await fetch(CART_UPDATE_URL, {
         method: 'POST',
         credentials: 'same-origin',
         cache: 'no-store',
@@ -1112,7 +1425,7 @@
     // theme customization or cart-mutation restriction. Better than
     // nothing, though it carries the provisional-token risk described above.
     try {
-      const res = await fetch('/cart.js', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fetch(CART_JS_URL, { credentials: 'same-origin', cache: 'no-store' });
       if (res.ok) {
         const cart = await res.json();
         if (cart && cart.token) {
@@ -1136,7 +1449,7 @@
 
   function persistUploadIds() {
     if (!allUploadedIds.length) return;
-    fetch('/cart/update.js', {
+    fetch(CART_UPDATE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1146,6 +1459,62 @@
         },
       }),
     }).catch(() => {});
+  }
+
+  /**
+   * Write the uploaded files as Shopify LINE-ITEM PROPERTIES on the product
+   * form. Unlike cart attributes, line-item properties are attached to the
+   * specific product line, so Shopify renders them directly under that product
+   * on the order page — which is where the store owner wants to see the file.
+   *
+   * We inject hidden inputs named `properties[Uploaded file]`,
+   * `properties[Uploaded file 2]`, … into the product's add-to-cart <form>.
+   * The value is the public preview URL, so it shows as a clickable link the
+   * merchant can open to preview/download. This travels with the order
+   * guaranteed — no dependency on cart-token matching.
+   */
+  function syncLineItemProperties() {
+    // Every upload/removal flows through here — re-check the required gate.
+    updateAddToCartGate();
+
+    // Find the product form this widget belongs to.
+    const form =
+      widget.closest('form[action*="/cart/add"]') ||
+      document.querySelector('form[action*="/cart/add"]');
+    if (!form) return;
+
+    // Remove any properties we previously injected, so removals are reflected.
+    form.querySelectorAll('input[data-cfup-prop="1"]').forEach((el) => el.remove());
+
+    allUploadedPreviews.forEach((url, i) => {
+      if (!url) return;
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.setAttribute('data-cfup-prop', '1');
+      // Shopify shows the property label + value under the line item. A blank
+      // label prefix ("_"?) would hide it; we want it visible, so use a clear
+      // human label. Multiple files get numbered labels.
+      input.name = 'properties[Uploaded file' + (i === 0 ? '' : ' ' + (i + 1)) + ']';
+      input.value = url;
+      form.appendChild(input);
+    });
+
+    // Also attach the raw upload ids as ONE hidden line-item property. The
+    // leading underscore keeps it out of the storefront/checkout/email
+    // display, but it still travels on the order — giving the orders/create
+    // webhook a dedicated, reliable id channel that does NOT depend on
+    // cart_token (which Shopify sends as null for PayPal / Shop Pay / express
+    // checkouts) NOR on parsing a preview URL. This is what makes the
+    // customised image reliably appear in both Filedrop's Orders view and the
+    // native Shopify order page. See WebhooksService.resolveUploadsForOrder().
+    if (allUploadedIds.length) {
+      const idInput = document.createElement('input');
+      idInput.type = 'hidden';
+      idInput.setAttribute('data-cfup-prop', '1');
+      idInput.name = 'properties[_Filedrop Upload IDs]';
+      idInput.value = allUploadedIds.join(',');
+      form.appendChild(idInput);
+    }
   }
 
   // ── Init ──────────────────────────────────────────────────────────────────

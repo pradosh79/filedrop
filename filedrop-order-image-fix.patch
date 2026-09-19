@@ -1,0 +1,797 @@
+diff --git a/.env.prod.example b/.env.prod.example
+index b75b9b3..c33dba1 100644
+--- a/.env.prod.example
++++ b/.env.prod.example
+@@ -15,7 +15,7 @@ APP_DOMAIN=your-domain.com
+ # Get from: partners.shopify.com → Apps → Your App → API credentials
+ SHOPIFY_API_KEY=your_shopify_api_key
+ SHOPIFY_API_SECRET=your_shopify_api_secret
+-SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_script_tags,read_themes,write_themes
++SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_files
+ 
+ # ── Database ─────────────────────────────────────────────────
+ DB_HOST=mysql
+diff --git a/backend/.env.example b/backend/.env.example
+index d83f89f..31a2f62 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -10,7 +10,7 @@ APP_URL=https://YOUR_NGROK_URL.ngrok.io
+ # ── Shopify (from partners.shopify.com) ───────────────────────
+ SHOPIFY_API_KEY=your_shopify_api_key
+ SHOPIFY_API_SECRET=your_shopify_api_secret
+-SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_metafields,read_metafields,write_files
++SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_files
+ # Set to "true" to mark Shopify app subscription charges as test charges
+ # (no real money moves). Always leave unset/"false" in production.
+ SHOPIFY_BILLING_TEST_MODE=false
+diff --git a/backend/.env.prod.example b/backend/.env.prod.example
+index 018cefa..14aad50 100644
+--- a/backend/.env.prod.example
++++ b/backend/.env.prod.example
+@@ -11,7 +11,7 @@ APP_URL=https://yourdomain.com
+ # ── Shopify ────────────────────────────────────────────────────
+ SHOPIFY_API_KEY=CHANGE_THIS
+ SHOPIFY_API_SECRET=CHANGE_THIS
+-SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_metafields,read_metafields,write_files
++SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_files
+ 
+ # ── Database ───────────────────────────────────────────────────
+ DB_HOST=localhost
+diff --git a/backend/src/orders/order-files.service.ts b/backend/src/orders/order-files.service.ts
+index f87f5b3..f18ba93 100644
+--- a/backend/src/orders/order-files.service.ts
++++ b/backend/src/orders/order-files.service.ts
+@@ -4,6 +4,7 @@ import { Merchant } from '../auth/entities/merchant.entity';
+ import { Upload } from '../uploads/entities/upload.entity';
+ import { StorageService } from '../storage/storage.service';
+ import { ShopifyTokenService } from '../shopify-token/shopify-token.service';
++import { makeDownloadToken } from '../uploads/download-token.util';
+ 
+ /**
+  * Makes customer uploads visible INSIDE the native Shopify order page, with a
+@@ -32,6 +33,10 @@ import { ShopifyTokenService } from '../shopify-token/shopify-token.service';
+ const API_VERSION = '2026-07';
+ const METAFIELD_NAMESPACE = 'filedrop';
+ const METAFIELD_KEY = 'customer_uploads';
++// Separate URL-list metafield. Needs only write_orders (not write_files), so it
++// always works and gives the merchant a clickable link to the customised image
++// even when the native file push can't run.
++const LINKS_METAFIELD_KEY = 'customer_upload_links';
+ 
+ @Injectable()
+ export class OrderFilesService {
+@@ -47,6 +52,8 @@ export class OrderFilesService {
+   // don't re-issue the mutation on every single order (it's idempotent, but
+   // there's no reason to pay the extra API call each time).
+   private readonly definitionEnsuredForShop = new Set<string>();
++  private readonly linksDefinitionEnsuredForShop = new Set<string>();
++  private readonly grantedScopesCache = new Map<string, string[]>();
+ 
+   constructor(
+     private readonly storageService: StorageService,
+@@ -94,6 +101,39 @@ export class OrderFilesService {
+ 
+     try {
+       const accessToken = await this.shopifyTokenService.getValidAccessToken(merchant);
++
++      // (A) Always attach clickable links first. This uses an order metafield
++      // of type list.url, which needs only write_orders — a scope we clearly
++      // have, since order notes already work. So even if the native file push
++      // below can't run (e.g. the token lacks write_files), the merchant still
++      // gets a link on the order that opens the customised image.
++      await this.ensureOrderLinksDefinition(merchant.shopDomain, accessToken);
++      await this.setOrderLinksMetafield(
++        merchant.shopDomain,
++        accessToken,
++        shopifyOrderId,
++        uploads,
++      ).catch((e: any) =>
++        this.logger.error(`Failed to set order links metafield: ${e?.message}`),
++      );
++
++      // (B) Native file thumbnails require the write_files scope. Check it up
++      // front so a missing scope becomes ONE clear, actionable log line instead
++      // of a silent per-file failure that leaves the card mysteriously empty.
++      const scopes = await this.getGrantedScopes(merchant.shopDomain, accessToken);
++      const scopesKnown = scopes.length > 0;
++      if (scopesKnown && !scopes.includes('write_files')) {
++        this.logger.error(
++          `❌ Order ${shopifyOrderId} on ${merchant.shopDomain}: the app's access token is ` +
++            `MISSING the "write_files" scope, so the customised image can't be pushed to ` +
++            `Shopify Files and the native file card will stay empty. A clickable link was ` +
++            `still attached. FIX: ensure SHOPIFY_SCOPES includes write_files, then have the ` +
++            `merchant reinstall / re-authorize the app so the token is re-granted. ` +
++            `Currently granted: ${scopes.join(', ')}`,
++        );
++        return;
++      }
++
+       await this.ensureOrderMetafieldDefinition(merchant.shopDomain, accessToken);
+ 
+       const fileGids: string[] = [];
+@@ -115,7 +155,8 @@ export class OrderFilesService {
+ 
+       if (!fileGids.length) {
+         this.logger.warn(
+-          `No files were pushed to Shopify for order ${shopifyOrderId}; skipping metafield.`,
++          `No files were pushed to Shopify for order ${shopifyOrderId}; native file card ` +
++            `left empty (clickable links were still attached).`,
+         );
+         return;
+       }
+@@ -135,6 +176,124 @@ export class OrderFilesService {
+     }
+   }
+ 
++  /**
++   * Return the scopes actually granted to our token for this shop, via
++   * GET /admin/oauth/access_scopes.json. Cached per shop. Returns [] on error,
++   * which the caller treats as "unknown" (it will still attempt the file push
++   * rather than skip it on a failed diagnostic call).
++   */
++  private async getGrantedScopes(
++    shopDomain: string,
++    accessToken: string,
++  ): Promise<string[]> {
++    const cached = this.grantedScopesCache.get(shopDomain);
++    if (cached) return cached;
++    try {
++      const res = await axios.get(
++        `https://${shopDomain}/admin/oauth/access_scopes.json`,
++        { headers: { 'X-Shopify-Access-Token': accessToken }, timeout: 10_000 },
++      );
++      const scopes: string[] = (res.data?.access_scopes || [])
++        .map((s: any) => s?.handle)
++        .filter(Boolean);
++      if (scopes.length) this.grantedScopesCache.set(shopDomain, scopes);
++      return scopes;
++    } catch (err: any) {
++      this.logger.warn(`getGrantedScopes failed for ${shopDomain}: ${err?.message}`);
++      return [];
++    }
++  }
++
++  /** Build the public, token-authed URL that opens/downloads an upload. */
++  private buildPreviewUrl(upload: Upload): string {
++    const base = (process.env.APP_URL || process.env.BACKEND_URL || '').replace(/\/$/, '');
++    const token = makeDownloadToken(upload.id);
++    return `${base}/api/v1/storefront/file/${upload.id}?token=${token}`;
++  }
++
++  /** Create (once per shop) the pinned list.url definition for upload links. */
++  private async ensureOrderLinksDefinition(
++    shopDomain: string,
++    accessToken: string,
++  ): Promise<void> {
++    if (this.linksDefinitionEnsuredForShop.has(shopDomain)) return;
++    try {
++      const result = await this.gql(
++        shopDomain,
++        accessToken,
++        `mutation metafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
++          metafieldDefinitionCreate(definition: $definition) {
++            createdDefinition { id }
++            userErrors { field message code }
++          }
++        }`,
++        {
++          definition: {
++            name: 'Filedrop customer upload links',
++            namespace: METAFIELD_NAMESPACE,
++            key: LINKS_METAFIELD_KEY,
++            type: 'list.url',
++            ownerType: 'ORDER',
++            pin: true,
++          },
++        },
++      );
++      const errs = result?.metafieldDefinitionCreate?.userErrors ?? [];
++      const alreadyExists = errs.some(
++        (e: any) => e.code === 'TAKEN' || e.message?.toLowerCase().includes('already'),
++      );
++      if (errs.length && !alreadyExists) {
++        this.logger.warn(
++          `links metafieldDefinitionCreate errors for ${shopDomain}: ${JSON.stringify(errs)}`,
++        );
++        return;
++      }
++      this.linksDefinitionEnsuredForShop.add(shopDomain);
++    } catch (err: any) {
++      this.logger.error(`ensureOrderLinksDefinition failed for ${shopDomain}: ${err?.message}`);
++    }
++  }
++
++  /** Set the order's list.url metafield to the uploads' preview links. */
++  private async setOrderLinksMetafield(
++    shopDomain: string,
++    accessToken: string,
++    shopifyOrderId: string,
++    uploads: Upload[],
++  ): Promise<void> {
++    const urls = uploads.map((u) => this.buildPreviewUrl(u)).filter(Boolean);
++    if (!urls.length) return;
++    const orderGid = shopifyOrderId.startsWith('gid://')
++      ? shopifyOrderId
++      : `gid://shopify/Order/${shopifyOrderId}`;
++
++    const result = await this.gql(
++      shopDomain,
++      accessToken,
++      `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
++        metafieldsSet(metafields: $metafields) {
++          metafields { id key namespace }
++          userErrors { field message }
++        }
++      }`,
++      {
++        metafields: [
++          {
++            ownerId: orderGid,
++            namespace: METAFIELD_NAMESPACE,
++            key: LINKS_METAFIELD_KEY,
++            type: 'list.url',
++            value: JSON.stringify(urls),
++          },
++        ],
++      },
++    );
++    const errs = result?.metafieldsSet?.userErrors ?? [];
++    if (errs.length) {
++      throw new Error(`links metafieldsSet errors: ${JSON.stringify(errs)}`);
++    }
++  }
++
+   /**
+    * Create (once per shop) the Metafield Definition that makes
+    * `filedrop.customer_uploads` render as a visible, pinned card on
+@@ -202,7 +361,7 @@ export class OrderFilesService {
+     }
+   }
+ 
+-  /** stagedUploadsCreate → PUT bytes → fileCreate. Returns the file GID. */
++  /** stagedUploadsCreate → PUT bytes → fileCreate → wait for READY. Returns the file GID. */
+   private async pushOneFileToShopify(
+     shopDomain: string,
+     accessToken: string,
+@@ -211,6 +370,7 @@ export class OrderFilesService {
+     const buffer = await this.storageService.getFileBuffer(upload.s3Key);
+     const filename = upload.originalFileName || upload.sanitizedFileName || 'upload';
+     const mime = upload.mimeType || 'application/octet-stream';
++    const isImage = mime.startsWith('image/');
+ 
+     // 1) staged target
+     const staged = await this.gql(
+@@ -234,6 +394,10 @@ export class OrderFilesService {
+       },
+     );
+ 
++    const stagedErrs = staged?.stagedUploadsCreate?.userErrors ?? [];
++    if (stagedErrs.length) {
++      throw new Error(`stagedUploadsCreate errors: ${JSON.stringify(stagedErrs)}`);
++    }
+     const target = staged?.stagedUploadsCreate?.stagedTargets?.[0];
+     if (!target?.url) {
+       throw new Error('stagedUploadsCreate returned no target');
+@@ -268,7 +432,7 @@ export class OrderFilesService {
+         files: [
+           {
+             alt: `Customer upload: ${filename}`,
+-            contentType: mime.startsWith('image/') ? 'IMAGE' : 'FILE',
++            contentType: isImage ? 'IMAGE' : 'FILE',
+             originalSource: target.resourceUrl,
+           },
+         ],
+@@ -279,7 +443,122 @@ export class OrderFilesService {
+     if (errs.length) {
+       throw new Error(`fileCreate errors: ${JSON.stringify(errs)}`);
+     }
+-    return created?.fileCreate?.files?.[0]?.id ?? null;
++    const file = created?.fileCreate?.files?.[0];
++    const gid: string | null = file?.id ?? null;
++    if (!gid) {
++      throw new Error('fileCreate returned no file id');
++    }
++
++    // 4) CRITICAL: a file created from a staged upload starts as UPLOADED and
++    // is processed asynchronously to READY (or FAILED). A list.file_reference
++    // metafield can only reference a file that is in the READY state — setting
++    // it against an UPLOADED/PROCESSING file fails with a "not in READY state"
++    // userError. The old code set the metafield immediately, so it silently
++    // failed and the order's file card stayed empty. Wait for READY here so the
++    // reference we hand to metafieldsSet is always valid.
++    const status =
++      file.fileStatus === 'READY'
++        ? 'READY'
++        : await this.waitForFileReady(shopDomain, accessToken, gid);
++
++    if (status !== 'READY') {
++      this.logger.warn(
++        `File "${filename}" (${gid}) did not reach READY (status=${status}); ` +
++          `skipping its metafield reference to avoid a broken/empty link.`,
++      );
++      return null;
++    }
++
++    return gid;
++  }
++
++  /**
++   * Poll a file's status until it is READY or FAILED (or we run out of tries).
++   * Small customer images normally reach READY within a second or two; the
++   * generous ceiling here is safe because attachUploadsToOrder runs in the
++   * background, off the webhook's response path.
++   */
++  private async waitForFileReady(
++    shopDomain: string,
++    accessToken: string,
++    gid: string,
++    maxAttempts = 20,
++    delayMs = 1000,
++  ): Promise<string> {
++    const query = `query fileStatus($id: ID!) {
++      node(id: $id) { ... on File { fileStatus } }
++    }`;
++    for (let attempt = 0; attempt < maxAttempts; attempt++) {
++      try {
++        const data = await this.gql(shopDomain, accessToken, query, { id: gid });
++        const status = data?.node?.fileStatus;
++        if (status === 'READY' || status === 'FAILED') return status;
++      } catch (err: any) {
++        // Transient read error — keep polling rather than giving up.
++        this.logger.warn(`waitForFileReady poll error for ${gid}: ${err?.message}`);
++      }
++      await new Promise((r) => setTimeout(r, delayMs));
++    }
++    return 'TIMEOUT';
++  }
++
++  /**
++   * Recovery path: attach files to an order ONLY if it doesn't already have
++   * them. Used from the orders/updated webhook so an order that was linked but
++   * whose file push didn't complete (e.g. an earlier transient failure, or a
++   * file that hadn't reached READY yet) self-heals without any manual step and
++   * without creating duplicate Shopify files on orders that are already fine.
++   */
++  async attachUploadsIfMissing(
++    merchant: Merchant,
++    shopifyOrderId: string,
++    uploads: Upload[],
++  ): Promise<void> {
++    if (!uploads.length) return;
++    try {
++      const accessToken = await this.shopifyTokenService.getValidAccessToken(merchant);
++      const existing = await this.getOrderFileMetafieldValue(
++        merchant.shopDomain,
++        accessToken,
++        shopifyOrderId,
++      );
++      // Value is a JSON array string, e.g. '["gid://shopify/MediaImage/1"]'.
++      // Treat null / '[]' / 'null' / '' as "no files attached yet".
++      const hasFiles = !!existing && existing !== '[]' && existing !== 'null';
++      if (hasFiles) return;
++
++      this.logger.log(
++        `Re-attaching files for order ${shopifyOrderId} on ${merchant.shopDomain} (file card was empty).`,
++      );
++      await this.attachUploadsToOrder(merchant, shopifyOrderId, uploads);
++    } catch (err: any) {
++      this.logger.error(`attachUploadsIfMissing failed: ${err?.message}`);
++    }
++  }
++
++  /** Read the order's current filedrop file metafield value (or null). */
++  private async getOrderFileMetafieldValue(
++    shopDomain: string,
++    accessToken: string,
++    shopifyOrderId: string,
++  ): Promise<string | null> {
++    const orderGid = shopifyOrderId.startsWith('gid://')
++      ? shopifyOrderId
++      : `gid://shopify/Order/${shopifyOrderId}`;
++    try {
++      const data = await this.gql(
++        shopDomain,
++        accessToken,
++        `query orderMetafield($id: ID!, $ns: String!, $key: String!) {
++          order(id: $id) { metafield(namespace: $ns, key: $key) { value } }
++        }`,
++        { id: orderGid, ns: METAFIELD_NAMESPACE, key: METAFIELD_KEY },
++      );
++      return data?.order?.metafield?.value ?? null;
++    } catch (err: any) {
++      this.logger.warn(`getOrderFileMetafieldValue failed: ${err?.message}`);
++      return null; // treat as "unknown" → caller will attempt attach
++    }
+   }
+ 
+   /** Set (or append to) the order's list.file_reference metafield. */
+diff --git a/backend/src/webhooks/webhooks.service.ts b/backend/src/webhooks/webhooks.service.ts
+index 6359b73..529832b 100644
+--- a/backend/src/webhooks/webhooks.service.ts
++++ b/backend/src/webhooks/webhooks.service.ts
+@@ -1,6 +1,6 @@
+ import { Injectable, Logger } from '@nestjs/common';
+ import { InjectRepository } from '@nestjs/typeorm';
+-import { Repository } from 'typeorm';
++import { Repository, In, IsNull, Between } from 'typeorm';
+ import { ConfigService } from '@nestjs/config';
+ import axios from 'axios';
+ import { Upload } from '../uploads/entities/upload.entity';
+@@ -314,33 +314,38 @@ export class WebhooksService {
+       return;
+     }
+ 
+-    const cartToken = order.cart_token;
+     const shopifyOrderId = String(order.id);
+     const orderId = String(order.order_number ?? order.id);
+ 
+-    if (!cartToken) {
+-      this.logger.warn(
+-        `orders/create webhook for #${orderId} (${shopDomain}) had no cart_token — cannot check for uploads to link.`,
+-      );
+-      return;
+-    }
+-
+-    const uploads = await this.uploadRepo.find({
+-      where: { merchantId: merchant.id, cartToken },
+-    });
++    // Resolve which of this merchant's uploads belong to this order.
++    //
++    // This USED to match ONLY on order.cart_token, and that is exactly what
++    // was breaking customised images. Shopify sends cart_token = null for a
++    // large share of real orders — anything paid through an offsite/express
++    // gateway (PayPal, Shop Pay, Apple/Google Pay) and many "Buy it now"
++    // flows. When cart_token was null (or a provisional token that never
++    // matched), the upload never received an orderId, so it disappeared from
++    // Filedrop's Orders view AND never got pushed onto the native Shopify
++    // order page.
++    //
++    // We now resolve uploads from the identifiers the theme widget already
++    // attaches to every order (cart attribute `_cfup_upload_ids` → order
++    // note_attributes, and the preview URL in each line item's properties),
++    // and only fall back to cart_token last. See resolveUploadsForOrder().
++    const { uploads, lineItemIdByUpload } = await this.resolveUploadsForOrder(
++      merchant.id,
++      order,
++    );
+ 
+     if (!uploads.length) {
+-      // Not necessarily a bug — most orders have no upload at all. But if this
+-      // fires for an order you KNOW had a file uploaded first, the cartToken
+-      // captured at upload time didn't match order.cart_token, which is
+-      // exactly the failure mode the /cart.js fix in the theme widget
+-      // addresses (see upload-widget.liquid getCartToken()).
+-      //
+-      // Uses .log() not .debug(): main.ts only enables ['error','warn','log']
+-      // levels, so .debug() here would be silently swallowed and this branch
+-      // would be invisible in production logs even when it fires.
++      // Most orders legitimately have no upload. If this fires for an order
++      // you KNOW had a customised file, inspect the logged identifiers below —
++      // it means none of note_attributes / line-item properties / cart_token
++      // pointed at a still-unlinked upload for this merchant.
+       this.logger.log(
+-        `ℹ️  No uploads found matching cartToken for order #${orderId} (${shopDomain}). cartToken from webhook: ${cartToken}`,
++        `ℹ️  No Filedrop uploads resolved for order #${orderId} (${shopDomain}). ` +
++          `cart_token=${order.cart_token ?? 'null'}; ` +
++          `note_attributes=${JSON.stringify(order.note_attributes ?? [])}`,
+       );
+       return;
+     }
+@@ -355,30 +360,266 @@ export class WebhooksService {
+       },
+     );
+ 
++    // Best-effort: record which specific line item each upload belongs to, so
++    // the customised image can later be shown against the correct product line.
++    for (const u of uploads) {
++      const lineItemId = lineItemIdByUpload.get(u.id);
++      if (lineItemId) {
++        await this.uploadRepo.update(u.id, { lineItemId: String(lineItemId) });
++      }
++    }
++
+     this.logger.log(
+-      `Associated ${uploads.length} uploads with order #${orderId} (${shopDomain})`,
++      `Associated ${uploads.length} upload(s) with order #${orderId} (${shopDomain})`,
+     );
+ 
+     // Add Shopify order timeline entry
+     await this.addOrderTimelineNote(merchant, order.id, uploads.length);
+ 
+-    // Push the actual files onto the Shopify order so the merchant can preview
+-    // and download them directly from the order page (native Metafields card).
+-    await this.orderFilesService.attachUploadsToOrder(
+-      merchant,
+-      shopifyOrderId,
+-      uploads,
+-    );
+-
+-    // In-app notification
++    // In-app notification (fast, local DB write)
+     await this.notificationsService.notifyUpload(merchant.id, {
+       fileName: uploads.length > 1 ? `${uploads.length} files` : uploads[0].originalFileName,
+       orderNumber: orderId,
+       customerEmail: order.email,
+     });
++
++    // Push the actual files onto the Shopify order so the merchant can preview
++    // and download them directly from the order page (native Metafields card).
++    //
++    // Deliberately NOT awaited: pushing bytes to Shopify Files and then waiting
++    // for image processing to reach READY can take several seconds, which would
++    // risk this webhook exceeding Shopify's response window and being retried.
++    // The uploads are already linked above, so this safely completes in the
++    // background. attachUploadsToOrder is best-effort and never throws.
++    void this.orderFilesService
++      .attachUploadsToOrder(merchant, shopifyOrderId, uploads)
++      .catch((e) =>
++        this.logger.error(`Background attachUploadsToOrder failed: ${e?.message}`),
++      );
++  }
++
++  /**
++   * Work out which of a merchant's uploads belong to a just-created order,
++   * using the most reliable signals first and cart_token only as a fallback.
++   *
++   * Strategy order:
++   *   1. Cart attribute `_cfup_upload_ids` — the widget writes this on every
++   *      upload (persistUploadIds() in upload-widget.liquid). Cart attributes
++   *      surface on the order as `note_attributes`, and unlike cart_token they
++   *      survive offsite/express checkouts. Durable path.
++   *   2. Line-item properties — the widget also writes the file's preview URL
++   *      as `properties[Uploaded file]` on the product line. The upload id is
++   *      embedded in that URL (/storefront/file/{id}). Parsing it resolves the
++   *      upload AND tells us which line item it belongs to.
++   *   3. cart_token — the original behaviour, kept as a last resort for the
++   *      orders that actually do carry a matching token.
++   *
++   * Every candidate id is re-checked against the DB scoped to this merchant and
++   * to uploads not yet linked to an order, so a stale/forged value in
++   * note_attributes can never attach someone else's file to this order.
++   */
++  private async resolveUploadsForOrder(
++    merchantId: string,
++    order: any,
++  ): Promise<{ uploads: Upload[]; lineItemIdByUpload: Map<string, string> }> {
++    const lineItemIdByUpload = new Map<string, string>();
++    const candidateIds = new Set<string>();
++
++    // (1) note_attributes (from the `_cfup_upload_ids` cart attribute)
++    for (const id of this.extractUploadIdsFromNoteAttributes(order)) {
++      candidateIds.add(id);
++    }
++
++    // (2) line-item properties (preview URL contains the upload id)
++    for (const { uploadId, lineItemId } of this.extractUploadRefsFromLineItems(order)) {
++      candidateIds.add(uploadId);
++      if (lineItemId) lineItemIdByUpload.set(uploadId, lineItemId);
++    }
++
++    let uploads: Upload[] = [];
++
++    if (candidateIds.size) {
++      uploads = await this.uploadRepo.find({
++        where: {
++          id: In([...candidateIds]),
++          merchantId,
++          orderId: IsNull(),
++          deletedAt: IsNull(),
++        },
++      });
++    }
++
++    // (3) Fallback: cart_token, only if the reliable paths found nothing.
++    if (!uploads.length && order.cart_token) {
++      uploads = await this.uploadRepo.find({
++        where: {
++          merchantId,
++          cartToken: String(order.cart_token).split('?')[0],
++          orderId: IsNull(),
++          deletedAt: IsNull(),
++        },
++      });
++    }
++
++    // (4) LAST-RESORT heuristic: link by product + time + (preferably) email.
++    //
++    // Some checkout paths strip EVERYTHING our widget attaches: "Buy it now",
++    // Shop Pay and the other dynamic/express buttons send no line-item
++    // properties and no cart attributes, and the order's cart_token won't match
++    // the provisional token captured before checkout. In that case none of
++    // (1)-(3) can fire, and the customised image would silently never link —
++    // which is exactly the empty-metafield / missing-from-Orders symptom.
++    //
++    // The upload row already stores productId, variantId, customerEmail and
++    // createdAt, and the order gives us the same facts, so we can still match:
++    // the most recent still-unlinked upload(s) for THIS merchant, for a product
++    // that's actually in THIS order, created shortly before it. We prefer an
++    // email match and only fall back to product+time when the upload carries no
++    // email (the common case, since shoppers upload before entering one).
++    if (!uploads.length) {
++      uploads = await this.resolveUploadsByHeuristic(merchantId, order);
++      if (uploads.length) {
++        this.logger.warn(
++          `⚠️  Linked ${uploads.length} upload(s) to order ${order.id} via LAST-RESORT ` +
++            `product/time heuristic (no cart_token / properties / note_attributes matched). ` +
++            `This is expected for Buy-it-now / Shop Pay checkouts.`,
++        );
++      }
++    }
++
++    return { uploads, lineItemIdByUpload };
++  }
++
++  /**
++   * Heuristic matcher — see caller. Deliberately conservative:
++   *   • same merchant, not yet linked to any order, not deleted
++   *   • productId is one of the products actually on this order
++   *   • createdAt within a window ending at the order time (never after it)
++   *   • if the upload has a customerEmail, it must equal the order's email
++   * Returns at most one upload per matching product line (the newest), so a
++   * single order can't vacuum up every unrelated upload for a popular product.
++   */
++  private async resolveUploadsByHeuristic(
++    merchantId: string,
++    order: any,
++  ): Promise<Upload[]> {
++    const lineItems: any[] = Array.isArray(order?.line_items) ? order.line_items : [];
++    const productIds = Array.from(
++      new Set(
++        lineItems
++          .map((li) => (li?.product_id != null ? String(li.product_id) : null))
++          .filter((v): v is string => !!v),
++      ),
++    );
++    if (!productIds.length) return [];
++
++    // Window: from HEURISTIC_WINDOW_HOURS before the order, up to the order
++    // time plus a small buffer for clock skew. Never match uploads created
++    // after the order was placed.
++    const HEURISTIC_WINDOW_HOURS = 12;
++    const orderTime = order?.created_at ? new Date(order.created_at) : new Date();
++    const windowStart = new Date(orderTime.getTime() - HEURISTIC_WINDOW_HOURS * 3600_000);
++    const windowEnd = new Date(orderTime.getTime() + 10 * 60_000);
++
++    const candidates = await this.uploadRepo.find({
++      where: {
++        merchantId,
++        productId: In(productIds),
++        orderId: IsNull(),
++        deletedAt: IsNull(),
++        createdAt: Between(windowStart, windowEnd),
++      },
++      order: { createdAt: 'DESC' },
++    });
++    if (!candidates.length) return [];
++
++    const orderEmail = (order?.email || '').trim().toLowerCase();
++
++    // Keep the newest still-unlinked upload per product, honouring the email
++    // constraint when the upload actually has one.
++    const pickedByProduct = new Map<string, Upload>();
++    for (const u of candidates) {
++      if (!u.productId || pickedByProduct.has(u.productId)) continue;
++      if (u.customerEmail && orderEmail && u.customerEmail.trim().toLowerCase() !== orderEmail) {
++        continue; // email present on both and they disagree → not this shopper
++      }
++      pickedByProduct.set(u.productId, u);
++    }
++
++    return [...pickedByProduct.values()];
++  }
++
++  /** Pull upload ids out of the `_cfup_upload_ids` order note attribute. */
++  private extractUploadIdsFromNoteAttributes(order: any): string[] {
++    const attrs: Array<{ name?: string; value?: string }> = Array.isArray(
++      order?.note_attributes,
++    )
++      ? order.note_attributes
++      : [];
++    const entry = attrs.find((a) => a?.name === '_cfup_upload_ids');
++    if (!entry?.value) return [];
++    return String(entry.value)
++      .split(',')
++      .map((s) => s.trim().toLowerCase())
++      .filter(Boolean);
++  }
++
++  /**
++   * Pull { uploadId, lineItemId } pairs out of the order's line-item
++   * properties. The widget stores the file's preview URL, which contains the
++   * upload id as /storefront/file/{uuid}. Also tolerates a bare uuid value.
++   */
++  private extractUploadRefsFromLineItems(
++    order: any,
++  ): Array<{ uploadId: string; lineItemId?: string }> {
++    const refs: Array<{ uploadId: string; lineItemId?: string }> = [];
++    const uuidRe =
++      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
++    const lineItems: any[] = Array.isArray(order?.line_items)
++      ? order.line_items
++      : [];
++
++    const uuidReGlobal = new RegExp(uuidRe.source, 'gi');
++
++    for (const li of lineItems) {
++      const props: any[] = Array.isArray(li?.properties) ? li.properties : [];
++      const lineItemId = li?.id ? String(li.id) : undefined;
++      for (const p of props) {
++        const value = typeof p?.value === 'string' ? p.value : '';
++        if (!value) continue;
++        // A single value may carry one upload id (preview URL) or several
++        // (a combined "_Filedrop Upload IDs" property), so collect them all.
++        const matches = value.match(uuidReGlobal);
++        if (!matches) continue;
++        for (const m of matches) {
++          refs.push({ uploadId: m.toLowerCase(), lineItemId });
++        }
++      }
++    }
++    return refs;
+   }
+ 
+   async handleOrderUpdate(shopDomain: string, order: any): Promise<void> {
++    const merchant = await this.merchantRepo.findOne({ where: { shopDomain } });
++    if (!merchant) return;
++
++    // Recovery: if this order has linked Filedrop uploads but its file card is
++    // still empty (e.g. the original push happened before the file finished
++    // processing, or hit a transient error), re-attach them now. Guarded by an
++    // emptiness check inside attachUploadsIfMissing so orders that are already
++    // fine are left untouched and no duplicate files are created.
++    const shopifyOrderId = String(order.id);
++    const uploads = await this.uploadRepo.find({
++      where: { merchantId: merchant.id, shopifyOrderId, deletedAt: IsNull() },
++    });
++    if (uploads.length) {
++      void this.orderFilesService
++        .attachUploadsIfMissing(merchant, shopifyOrderId, uploads)
++        .catch((e) =>
++          this.logger.error(`orders/updated re-attach failed: ${e?.message}`),
++        );
++    }
++
+     this.logger.log(`Order updated: ${order.id} on ${shopDomain}`);
+   }
+ 
+diff --git a/extensions/theme-extension/blocks/upload-widget.liquid b/extensions/theme-extension/blocks/upload-widget.liquid
+index acffe5e..b1f68bb 100644
+--- a/extensions/theme-extension/blocks/upload-widget.liquid
++++ b/extensions/theme-extension/blocks/upload-widget.liquid
+@@ -1244,6 +1244,23 @@
+       input.value = url;
+       form.appendChild(input);
+     });
++
++    // Also attach the raw upload ids as ONE hidden line-item property. The
++    // leading underscore keeps it out of the storefront/checkout/email
++    // display, but it still travels on the order — giving the orders/create
++    // webhook a dedicated, reliable id channel that does NOT depend on
++    // cart_token (which Shopify sends as null for PayPal / Shop Pay / express
++    // checkouts) NOR on parsing a preview URL. This is what makes the
++    // customised image reliably appear in both Filedrop's Orders view and the
++    // native Shopify order page. See WebhooksService.resolveUploadsForOrder().
++    if (allUploadedIds.length) {
++      const idInput = document.createElement('input');
++      idInput.type = 'hidden';
++      idInput.setAttribute('data-cfup-prop', '1');
++      idInput.name = 'properties[_Filedrop Upload IDs]';
++      idInput.value = allUploadedIds.join(',');
++      form.appendChild(idInput);
++    }
+   }
+ 
+   // ── Init ──────────────────────────────────────────────────────────────────
+diff --git a/scripts/setup.js b/scripts/setup.js
+index 86f3dce..ba4f4ff 100644
+--- a/scripts/setup.js
++++ b/scripts/setup.js
+@@ -123,7 +123,7 @@ APP_DOMAIN=${domain}
+ 
+ SHOPIFY_API_KEY=${shopifyKey}
+ SHOPIFY_API_SECRET=${shopifySecret}
+-SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_script_tags,read_themes,write_themes
++SHOPIFY_SCOPES=read_products,write_products,read_orders,write_orders,read_customers,write_files
+ 
+ DB_HOST=mysql
+ DB_PORT=3306

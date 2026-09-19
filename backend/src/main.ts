@@ -15,6 +15,13 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log'],
   });
 
+  // Behind Railway's (single) reverse proxy. Trusting exactly one proxy hop
+  // makes req.ip resolve to the real client IP from X-Forwarded-For — required
+  // for per-IP rate limiting to work per shopper rather than collapsing every
+  // request onto the proxy's IP. Trusting only 1 hop also prevents a client
+  // from spoofing X-Forwarded-For to evade the limit.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
   app.use((req: any, res: any, next: any) => {
     // Required for Shopify embedded apps - allow Shopify admin to load this in an iframe
     res.removeHeader('X-Frame-Options');
@@ -28,8 +35,15 @@ async function bootstrap() {
   app.setGlobalPrefix('api/v1', { exclude: ['/'] });
 
   app.enableCors({
+    // The storefront widget calls the public /storefront/* endpoints from every
+    // merchant's own (and custom) domain, so the origin must stay reflective.
+    // That is only safe because this API authenticates with the Authorization
+    // (Bearer JWT) and X-Admin-Key headers — never cookies — so credentialed
+    // (cookie) cross-origin requests are explicitly disabled. Reflecting the
+    // origin *with* credentials:true would have let any site make authenticated
+    // cookie requests.
     origin: true,
-    credentials: true,
+    credentials: false,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
       'Content-Type', 'Authorization',

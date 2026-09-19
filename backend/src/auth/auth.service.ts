@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -36,6 +36,11 @@ export class AuthService {
    * Generate the Shopify OAuth authorization URL.
    */
   generateAuthUrl(shop: string, state: string): string {
+    // Defense-in-depth: never build an OAuth redirect URL from an untrusted
+    // shop value. Only a real shop subdomain is allowed (see auth.controller).
+    if (!shop || !/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+      throw new BadRequestException('Invalid shop domain');
+    }
     const apiKey = this.configService.get('SHOPIFY_API_KEY');
     const scopes = this.configService.get('SHOPIFY_SCOPES');
     const redirectUri = `${this.configService.get('APP_URL')}/api/v1/auth/callback`;
@@ -64,7 +69,13 @@ export class AuthService {
       .update(message)
       .digest('hex');
 
-    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(hmac));
+    const computedBuf = Buffer.from(computed);
+    const providedBuf = Buffer.from(hmac);
+    // timingSafeEqual throws if the two buffers differ in length, so a malformed
+    // hmac of the wrong length would crash (500) instead of being rejected.
+    // Guard the length first, then compare in constant time.
+    if (computedBuf.length !== providedBuf.length) return false;
+    return crypto.timingSafeEqual(computedBuf, providedBuf);
   }
 
   /**

@@ -11,9 +11,11 @@ import { StorageService } from '../storage/storage.service';
 import { SecurityService } from '../security/security.service';
 import { EmailService } from '../email/email.service';
 import { AppSettings } from '../admin/entities/app-settings.entity';
+import { Product } from '../products/entities/product.entity';
 import { v4 as uuid } from 'uuid';
 import { getImageDimensions } from '../common/utils/image-dimensions';
 import { buildDownloadFilename } from '../common/utils/download-filename.util';
+import { makeDownloadToken } from '../uploads/download-token.util';
 
 @Injectable()
 export class StorefrontService {
@@ -27,20 +29,43 @@ export class StorefrontService {
     @InjectRepository(Plan) private readonly planRepo: Repository<Plan>,
     @InjectRepository(Subscription) private readonly subRepo: Repository<Subscription>,
     @InjectRepository(AppSettings) private readonly appSettingsRepo: Repository<AppSettings>,
+    @InjectRepository(Product) private readonly productRepo: Repository<Product>,
     private readonly storageService: StorageService,
     private readonly securityService: SecurityService,
     private readonly emailService: EmailService,
   ) {}
 
   async resolveMerchantId(shopDomainOrMerchantId: string): Promise<string> {
-    // Callers may pass either the Shopify shop domain (from the widget) or
-    // an actual merchant UUID (from internal/back-office calls). Try shop
-    // domain first since that's what the storefront widget sends.
-    const byShop = await this.merchantRepo.findOne({
-      where: { shopDomain: shopDomainOrMerchantId, isActive: true },
-    });
-    if (byShop) return byShop.id;
-    return shopDomainOrMerchantId;
+    // Callers may pass either the Shopify shop domain (from the widget) or an
+    // actual merchant UUID (internal calls). Try shop domain first since that's
+    // what the storefront widget sends.
+    const raw = (shopDomainOrMerchantId || '').trim();
+
+    // Normalize: strip protocol, a leading "www.", any path, and lower-case —
+    // guards against a theme/widget sending a URL-ish or mixed-case value.
+    const normalized = raw
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/.*$/, '')
+      .replace(/^www\./i, '')
+      .toLowerCase();
+
+    const candidates = Array.from(new Set([raw, normalized])).filter(Boolean);
+    for (const shopDomain of candidates) {
+      const byShop = await this.merchantRepo.findOne({
+        where: { shopDomain, isActive: true },
+      });
+      if (byShop) return byShop.id;
+    }
+
+    // Bare store handle (e.g. "store5" with no ".myshopify.com") — try canonical.
+    if (normalized && !normalized.includes('.')) {
+      const byPermanent = await this.merchantRepo.findOne({
+        where: { shopDomain: `${normalized}.myshopify.com`, isActive: true },
+      });
+      if (byPermanent) return byPermanent.id;
+    }
+
+    return raw;
   }
 
   async getFieldsForProduct(shopOrMerchantId: string, productId?: string, variantId?: string, tags: string[] = []) {
@@ -48,21 +73,67 @@ export class StorefrontService {
     const merchant = await this.merchantRepo.findOne({ where: { id: merchantId, isActive: true } });
     if (!merchant) throw new NotFoundException('Store not found');
 
+    // The first time the widget fetches its fields, the Filedrop theme block is
+    // actually rendering on the storefront (or in the theme-editor preview) —
+    // i.e. the merchant has completed "Add the Filedrop block to your theme".
+    // Record it once so that onboarding step reflects reality instead of being
+    // ticked by default. Fire-and-forget so it never slows the storefront.
+    if (!merchant.storefrontActivatedAt) {
+      void this.merchantRepo
+        .update({ id: merchant.id }, { storefrontActivatedAt: new Date() })
+        .catch(() => undefined);
+    }
+
     const fields = await this.fieldRepo.find({
       where: { merchantId, isActive: true },
       order: { sortOrder: 'ASC' },
     });
 
+    // The widget only sends productId + variantId, so derive the product's
+    // collections and tags from our cached catalogue. This is what makes
+    // COLLECTION and TAG assignment actually work on the storefront.
+    let productCollectionIds: string[] = [];
+    let productTags: string[] = Array.isArray(tags) ? [...tags] : [];
+    if (productId) {
+      const product = await this.productRepo.findOne({
+        where: { merchantId, shopifyProductId: String(productId) },
+      });
+      if (product) {
+        productCollectionIds = (Array.isArray(product.collections) ? product.collections : [])
+          .map((c: any) => String(c.id));
+        if (Array.isArray(product.tags)) {
+          productTags = [...new Set([...productTags, ...product.tags])];
+        }
+      }
+    }
+
+    // The admin picker saves selections to `assignedResourceIds` (products /
+    // variants / collections) and `assignedTags`. Older data may still live in
+    // the legacy `assignmentIds` column, so fall back to it. Reading the wrong
+    // column here was why assigned fields never appeared on the storefront.
+    const resourceIds = (f: UploadField): string[] =>
+      f.assignedResourceIds && f.assignedResourceIds.length
+        ? f.assignedResourceIds
+        : f.assignmentIds || [];
+    const tagIds = (f: UploadField): string[] =>
+      f.assignedTags && f.assignedTags.length ? f.assignedTags : f.assignmentIds || [];
+
     return fields
       .filter(field => {
-        if (field.assignmentType === AssignmentType.STORE) return true;
-        if (field.assignmentType === AssignmentType.PRODUCT && productId)
-          return (field.assignmentIds || []).includes(productId);
-        if (field.assignmentType === AssignmentType.VARIANT && variantId)
-          return (field.assignmentIds || []).includes(variantId);
-        if (field.assignmentType === AssignmentType.TAG && tags.length)
-          return (field.assignmentIds || []).some(id => tags.includes(id));
-        return false;
+        switch (field.assignmentType) {
+          case AssignmentType.STORE:
+            return true;
+          case AssignmentType.PRODUCT:
+            return !!productId && resourceIds(field).includes(String(productId));
+          case AssignmentType.VARIANT:
+            return !!variantId && resourceIds(field).includes(String(variantId));
+          case AssignmentType.COLLECTION:
+            return productCollectionIds.some(c => resourceIds(field).includes(c));
+          case AssignmentType.TAG:
+            return productTags.some(t => tagIds(field).includes(t));
+          default:
+            return false;
+        }
       })
       .map(f => ({
         id: f.id,
@@ -119,6 +190,32 @@ export class StorefrontService {
     return { buffer, mimeType };
   }
 
+  /**
+   * Resolve a short-lived storage URL for a customer upload, used by the public
+   * token-authed preview/download route. Token verification happens in the
+   * controller; by the time we're here the request is already authorized.
+   */
+  async getPublicFileUrl(
+    uploadId: string,
+    forceDownload: boolean,
+  ): Promise<{ url: string }> {
+    const upload = await this.uploadRepo.findOne({ where: { id: uploadId } });
+    if (!upload) throw new NotFoundException('Upload not found');
+    if (upload.status === UploadStatus.INFECTED) {
+      throw new ForbiddenException('File is not available');
+    }
+
+    // Presign for a short window purely to redirect the browser to storage.
+    // The permanence lives in the token on our own URL, not in this one.
+    const filename = buildDownloadFilename(upload);
+    const url = await this.storageService.getSignedDownloadUrl(
+      upload.s3Key,
+      forceDownload ? filename : undefined,
+      300,
+    );
+    return { url };
+  }
+
   async getPublicSettings(shopOrMerchantId: string) {
     const merchantId = await this.resolveMerchantId(shopOrMerchantId);
     const s = await this.settingsRepo.findOne({ where: { merchantId } });
@@ -164,11 +261,18 @@ export class StorefrontService {
     let imageHeight: number = null;
     if (file.mimetype.startsWith('image/')) {
       const dims = getImageDimensions(file.buffer);
-      if (dims) { imageWidth = dims.width; imageHeight = dims.height; }
-      if (field.minWidth && imageWidth < field.minWidth) throw new BadRequestException(`Min width: ${field.minWidth}px`);
-      if (field.maxWidth && imageWidth > field.maxWidth) throw new BadRequestException(`Max width: ${field.maxWidth}px`);
-      if (field.minHeight && imageHeight < field.minHeight) throw new BadRequestException(`Min height: ${field.minHeight}px`);
-      if (field.maxHeight && imageHeight > field.maxHeight) throw new BadRequestException(`Max height: ${field.maxHeight}px`);
+      // Only enforce dimension rules when the dimensions were actually parsed.
+      // Otherwise imageWidth/imageHeight stay null, and `null < field.minWidth`
+      // coerces to `0 < minWidth` === true, wrongly rejecting a valid file with
+      // a misleading "Min width" error.
+      if (dims) {
+        imageWidth = dims.width;
+        imageHeight = dims.height;
+        if (field.minWidth && imageWidth < field.minWidth) throw new BadRequestException(`Min width: ${field.minWidth}px`);
+        if (field.maxWidth && imageWidth > field.maxWidth) throw new BadRequestException(`Max width: ${field.maxWidth}px`);
+        if (field.minHeight && imageHeight < field.minHeight) throw new BadRequestException(`Min height: ${field.minHeight}px`);
+        if (field.maxHeight && imageHeight > field.maxHeight) throw new BadRequestException(`Max height: ${field.maxHeight}px`);
+      }
     }
 
     const sanitized = this.securityService.sanitizeFileName(file.originalname);
@@ -204,7 +308,23 @@ export class StorefrontService {
 
     this.virusScanAsync(upload, merchant).catch(e => this.logger.error(e.message));
 
-    return { uploadId: upload.id, fileName: sanitized, fileSize: file.size, status: 'pending' };
+    const publicBase = (process.env.APP_URL || process.env.BACKEND_URL || '').replace(/\/$/, '');
+    const token = makeDownloadToken(upload.id);
+    const previewUrl = `${publicBase}/api/v1/storefront/file/${upload.id}?token=${token}`;
+    const downloadUrl = `${previewUrl}&download=1`;
+
+    return {
+      uploadId: upload.id,
+      id: upload.id,
+      fileName: sanitized,
+      fileSize: file.size,
+      status: 'pending',
+      // Public, permanent, token-authed URLs. The widget writes previewUrl into
+      // a Shopify line-item property so it shows under the product on the order.
+      previewUrl,
+      downloadUrl,
+      isImage: (upload.mimeType || '').startsWith('image/'),
+    };
   }
 
   private async virusScanAsync(upload: Upload, merchant: Merchant) {
@@ -297,7 +417,15 @@ export class StorefrontService {
   }
 
   private async checkPlanLimits(merchant: Merchant) {
-    const sub = await this.subRepo.findOne({ where: { merchantId: merchant.id, status: SubscriptionStatus.ACTIVE } });
+    // Match ACTIVE *and* TRIAL subscriptions — a merchant on a trial should get
+    // their trial plan's limits, not silently fall back to the Free plan.
+    const sub = await this.subRepo.findOne({
+      where: [
+        { merchantId: merchant.id, status: SubscriptionStatus.ACTIVE },
+        { merchantId: merchant.id, status: SubscriptionStatus.TRIAL },
+      ],
+      order: { createdAt: 'DESC' },
+    });
     const plan = sub
       ? await this.planRepo.findOne({ where: { id: sub.planId } })
       : await this.planRepo.findOne({ where: { name: PlanName.FREE } });
@@ -313,7 +441,7 @@ export class StorefrontService {
       );
       throw new ForbiddenException('This store is not accepting new uploads right now. Please try again later.');
     }
-    if (Number(merchant.storageUsedBytes) >= Number(plan.storageBytes)) {
+    if (Number(plan.storageBytes) !== -1 && Number(merchant.storageUsedBytes) >= Number(plan.storageBytes)) {
       this.logger.warn(`Upload blocked for merchant ${merchant.id}: storage limit reached (plan: ${plan.displayName})`);
       throw new ForbiddenException('This store is not accepting new uploads right now. Please try again later.');
     }

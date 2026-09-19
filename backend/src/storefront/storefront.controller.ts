@@ -14,15 +14,26 @@ import {
   Res,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { StorefrontService } from './storefront.service';
+import type { Response } from 'express';
+import { verifyDownloadToken } from '../uploads/download-token.util';
 
 /**
  * Public API used by the Shopify theme extension (upload-widget.liquid).
  * No JWT required — authenticated via shop domain + HMAC or merchant token
  * embedded in the widget's initialization script.
+ *
+ * Because these routes are public and unauthenticated, the write endpoints
+ * (upload/delete) are rate-limited per IP (ThrottlerGuard) to prevent abuse —
+ * flooding the upload endpoint would otherwise let anyone exhaust a merchant's
+ * storage/plan limits and drive up cost. The read endpoints are intentionally
+ * left un-throttled: they're hit on every storefront page load and carry no
+ * cost/abuse risk, so throttling them could 429 legitimate shoppers.
  */
 @ApiTags('Storefront (Public)')
 @Controller('storefront')
@@ -81,7 +92,15 @@ export class StorefrontController {
    * merchantId embedded in the widget identifies which store this belongs to.
    */
   @Post('upload')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 * 1024 } }))
+  @UseGuards(ThrottlerGuard)
+  // Per-IP cap on the public upload endpoint: 5/sec and 30/min. Generous for a
+  // real shopper (who uploads a handful of files) but stops flooding/abuse.
+  @Throttle({ short: { limit: 5, ttl: 1000 }, long: { limit: 30, ttl: 60000 } })
+  // Hard ingress cap of 100MB per file. Multer buffers the upload in memory and
+  // plan/field size checks only run afterwards, so this is the real ceiling —
+  // it must be a sane fixed limit, not multi-gigabyte, to avoid memory-pressure
+  // DoS. (Per-merchant/plan limits are enforced in the service on top of this.)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   @ApiOperation({ summary: 'Customer file upload (public)' })
   async uploadFile(
     @UploadedFile() file: any,
@@ -118,6 +137,8 @@ export class StorefrontController {
    */
   @HttpCode(HttpStatus.NO_CONTENT)
   @Delete('upload/:uploadId')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ short: { limit: 5, ttl: 1000 }, long: { limit: 30, ttl: 60000 } })
   @ApiOperation({ summary: 'Customer removes their upload (public)' })
   removeUpload(
     @Param('uploadId') uploadId: string,
@@ -128,8 +149,36 @@ export class StorefrontController {
   }
 
   /**
-   * POST /storefront/upload/rebind-cart-token
+   * GET /storefront/file/:uploadId?token=<hmac>
    *
+   * Public, permanent, token-authed preview/download for a customer upload.
+   * This is the URL written into the Shopify order's line-item property, so a
+   * store owner can click it straight from the order page to preview and
+   * download the file. The HMAC token makes the link unguessable without any
+   * login; there's no expiry, so it keeps working for the life of the order.
+   *
+   * ?download=1 forces a download; otherwise images render inline in the
+   * browser (preview).
+   */
+  @Get('file/:uploadId')
+  @ApiOperation({ summary: 'Public preview/download for a customer upload (token-authed)' })
+  async getFile(
+    @Param('uploadId') uploadId: string,
+    @Query('token') token: string,
+    @Query('download') download: string,
+    @Res() res: Response,
+  ) {
+    if (!verifyDownloadToken(uploadId, token)) {
+      throw new UnauthorizedException('Invalid file token');
+    }
+    const { url } = await this.storefrontService.getPublicFileUrl(
+      uploadId,
+      download === '1',
+    );
+    return res.redirect(302, url);
+  }
+
+  /**
    * Shopify does not assign a cart's final, durable token until an item is
    * actually added to it — but this widget uploads files BEFORE "Add to
    * Cart" is clicked, so the token captured at upload time can be a
