@@ -68,7 +68,7 @@ export class StorefrontService {
     return raw;
   }
 
-  async getFieldsForProduct(shopOrMerchantId: string, productId?: string, variantId?: string, tags: string[] = []) {
+  async getFieldsForProduct(shopOrMerchantId: string, productId?: string, variantId?: string, tags: string[] = [], collections: string[] = []) {
     const merchantId = await this.resolveMerchantId(shopOrMerchantId);
     const merchant = await this.merchantRepo.findOne({ where: { id: merchantId, isActive: true } });
     if (!merchant) throw new NotFoundException('Store not found');
@@ -89,18 +89,24 @@ export class StorefrontService {
       order: { sortOrder: 'ASC' },
     });
 
-    // The widget only sends productId + variantId, so derive the product's
-    // collections and tags from our cached catalogue. This is what makes
-    // COLLECTION and TAG assignment actually work on the storefront.
-    let productCollectionIds: string[] = [];
+    // Plan gating: premium capabilities only reach the storefront if the
+    // merchant's plan includes them (so features aren't free on every plan).
+    const planFeatures = await this.getPlanFeatures(merchantId);
+
+    // Start from what the widget sent directly (from Liquid): the product's
+    // tags and collection IDs. This makes TAG and COLLECTION assignment work on
+    // ANY product — including ones added after install that aren't in our cached
+    // catalogue yet. We still merge in the cached values as a fallback.
+    let productCollectionIds: string[] = Array.isArray(collections) ? [...collections] : [];
     let productTags: string[] = Array.isArray(tags) ? [...tags] : [];
     if (productId) {
       const product = await this.productRepo.findOne({
         where: { merchantId, shopifyProductId: String(productId) },
       });
       if (product) {
-        productCollectionIds = (Array.isArray(product.collections) ? product.collections : [])
+        const cachedCollections = (Array.isArray(product.collections) ? product.collections : [])
           .map((c: any) => String(c.id));
+        productCollectionIds = [...new Set([...productCollectionIds, ...cachedCollections])];
         if (Array.isArray(product.tags)) {
           productTags = [...new Set([...productTags, ...product.tags])];
         }
@@ -135,31 +141,40 @@ export class StorefrontService {
             return false;
         }
       })
-      .map(f => ({
-        id: f.id,
-        label: f.label,
-        description: f.description,
-        helpText: f.helpText,
-        buttonText: f.buttonText,
-        isRequired: f.required,
-        maxFileSizeMb: f.maxFileSizeMb,
-        minFileSizeMb: f.minFileSizeMb,
-        maxFiles: f.maxFiles,
-        allowedExtensions: f.allowedExtensions,
-        fieldType: f.fieldType,
-        enableCropping: f.enableCropping,
-        enableRotation: f.enableRotation,
-        enablePreview: f.enablePreview,
-        previewTemplateUrl: f.enablePreview ? f.previewTemplateUrl : null,
-        previewPlacement: f.enablePreview ? f.previewPlacement : null,
-        allowCustomerPositioning: f.enablePreview ? f.allowCustomerPositioning : false,
-        allowCustomerText: f.enablePreview ? f.allowCustomerText : false,
-        minWidth: f.minWidth,
-        maxWidth: f.maxWidth,
-        minHeight: f.minHeight,
-        maxHeight: f.maxHeight,
-        requiredAspectRatio: f.requiredAspectRatio,
-      }));
+      .map(f => {
+        // Enforce plan entitlements: a feature reaches the storefront only if
+        // the field is configured for it AND the plan allows it.
+        const editorAllowed = !!planFeatures.imageEditor;
+        const previewAllowed = f.enablePreview && !!planFeatures.productPreview;
+        const positioningAllowed =
+          previewAllowed && f.allowCustomerPositioning && !!planFeatures.customerPositioning;
+        return {
+          id: f.id,
+          label: f.label,
+          description: f.description,
+          helpText: f.helpText,
+          buttonText: f.buttonText,
+          isRequired: f.required,
+          maxFileSizeMb: f.maxFileSizeMb,
+          minFileSizeMb: f.minFileSizeMb,
+          maxFiles: f.maxFiles,
+          allowedExtensions: f.allowedExtensions,
+          fieldType: f.fieldType,
+          enableCropping: f.enableCropping && editorAllowed,
+          enableRotation: f.enableRotation && editorAllowed,
+          enablePreview: previewAllowed,
+          previewTemplateUrl: previewAllowed ? f.previewTemplateUrl : null,
+          previewPlacement: previewAllowed ? f.previewPlacement : null,
+          allowCustomerPositioning: positioningAllowed,
+          allowCustomerText: previewAllowed ? f.allowCustomerText : false,
+          backgroundSource: previewAllowed ? (f.backgroundSource || 'product') : 'product',
+          minWidth: f.minWidth,
+          maxWidth: f.maxWidth,
+          minHeight: f.minHeight,
+          maxHeight: f.maxHeight,
+          requiredAspectRatio: f.requiredAspectRatio,
+        };
+      });
   }
 
   /**
@@ -416,6 +431,20 @@ export class StorefrontService {
     return { updated };
   }
 
+  private async getPlanFeatures(merchantId: string): Promise<Record<string, boolean>> {
+    const sub = await this.subRepo.findOne({
+      where: [
+        { merchantId, status: SubscriptionStatus.ACTIVE },
+        { merchantId, status: SubscriptionStatus.TRIAL },
+      ],
+      order: { createdAt: 'DESC' },
+    });
+    const plan = sub
+      ? await this.planRepo.findOne({ where: { id: sub.planId } })
+      : await this.planRepo.findOne({ where: { isDefault: true } });
+    return (plan?.features as Record<string, boolean>) || {};
+  }
+
   private async checkPlanLimits(merchant: Merchant) {
     // Match ACTIVE *and* TRIAL subscriptions — a merchant on a trial should get
     // their trial plan's limits, not silently fall back to the Free plan.
@@ -428,7 +457,7 @@ export class StorefrontService {
     });
     const plan = sub
       ? await this.planRepo.findOne({ where: { id: sub.planId } })
-      : await this.planRepo.findOne({ where: { name: PlanName.FREE } });
+      : await this.planRepo.findOne({ where: { isDefault: true } });
     if (!plan) return;
     // These are shown directly to the SHOPPER on the storefront (not the
     // merchant), so they deliberately don't mention plan names or specific

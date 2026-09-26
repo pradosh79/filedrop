@@ -10,6 +10,8 @@ import { StorageService } from '../storage/storage.service';
 import { SecurityService } from '../security/security.service';
 import { getImageDimensions } from '../common/utils/image-dimensions';
 import { buildDownloadFilename } from '../common/utils/download-filename.util';
+import { MerchantSettings } from '../settings/entities/merchant-settings.entity';
+import { makeDownloadToken } from './download-token.util';
 import { convertHeicToJpegIfNeeded, renameHeicToJpg } from '../common/utils/heic-support';
 import { CreateUploadFieldDto } from './dto/create-upload-field.dto';
 import { UpdateUploadFieldDto } from './dto/update-upload-field.dto';
@@ -23,6 +25,7 @@ export class UploadsService {
     @InjectRepository(Upload)        private readonly uploadRepo: Repository<Upload>,
     @InjectRepository(UploadField)   private readonly fieldRepo: Repository<UploadField>,
     @InjectRepository(Merchant)      private readonly merchantRepo: Repository<Merchant>,
+    @InjectRepository(MerchantSettings) private readonly settingsRepo: Repository<MerchantSettings>,
     private readonly storageService: StorageService,
     private readonly securityService: SecurityService,
   ) {}
@@ -83,7 +86,11 @@ export class UploadsService {
 
     const appUrl = process.env.APP_URL || '';
     field.previewTemplateKey = key;
-    field.previewTemplateUrl = `${appUrl}/api/v1/storefront/preview-template/${fieldId}`;
+    // Cache-bust per upload: the URL path is stable per field, so without a
+    // version the browser/CDN would keep serving the FIRST image after a
+    // re-upload. A fresh ?v= each upload forces the new image to load (the GET
+    // endpoint ignores the query param and serves the current file).
+    field.previewTemplateUrl = `${appUrl}/api/v1/storefront/preview-template/${fieldId}?v=${Date.now()}`;
     field.enablePreview = true;
     if (!field.previewPlacement) {
       // Sensible default placement so merchants see something immediately
@@ -91,6 +98,22 @@ export class UploadsService {
       field.previewPlacement = { x: 25, y: 25, width: 50, height: 50 };
     }
 
+    return this.fieldRepo.save(field);
+  }
+
+  /**
+   * Removes the merchant's mockup/template for a field: deletes the stored file
+   * and clears both the URL and the internal storage key. Used by the admin
+   * "Remove" button so a wrong template can be cleared. The storefront then
+   * falls back to the product image automatically.
+   */
+  async clearPreviewTemplate(merchantId: string, fieldId: string): Promise<UploadField> {
+    const field = await this.findField(merchantId, fieldId);
+    if (field.previewTemplateKey) {
+      await this.storageService.deleteFile(field.previewTemplateKey).catch(() => {});
+    }
+    field.previewTemplateUrl = null as any;
+    field.previewTemplateKey = null as any;
     return this.fieldRepo.save(field);
   }
 
@@ -285,7 +308,24 @@ export class UploadsService {
     if (upload.status === UploadStatus.INFECTED) {
       throw new ForbiddenException('File is infected and cannot be downloaded');
     }
-    return this.storageService.getSignedDownloadUrl(upload.s3Key, buildDownloadFilename(upload), 3600);
+
+    // Honour the merchant's "Download Link Expiry" setting instead of a fixed
+    // window. 0 = "Never expires".
+    const settings = await this.settingsRepo.findOne({ where: { merchantId } });
+    const expiry = settings?.signedUrlExpirySeconds ?? 0;
+    const filename = buildDownloadFilename(upload);
+
+    if (expiry > 0) {
+      // Temporary link that expires after the configured window.
+      return this.storageService.getSignedDownloadUrl(upload.s3Key, filename, expiry);
+    }
+
+    // "Never expires": a permanent app-served link. The HMAC token never
+    // expires; each request mints a fresh short-lived storage URL under the
+    // hood (via the existing token-authed file endpoint).
+    const base = (process.env.APP_URL || process.env.BACKEND_URL || '').replace(/\/$/, '');
+    const token = makeDownloadToken(uploadId);
+    return `${base}/api/v1/storefront/file/${uploadId}?token=${token}&download=1`;
   }
 
   async deleteUpload(merchantId: string, uploadId: string): Promise<void> {

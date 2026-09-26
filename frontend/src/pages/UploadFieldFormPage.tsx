@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Page, Layout, Card, Form, FormLayout, TextField, Select,
   Checkbox, RangeSlider, Tag, Button, Spinner, Banner,
@@ -54,6 +54,7 @@ const defaultForm = {
   previewPlacement: { x: 25, y: 25, width: 50, height: 50 },
   allowCustomerPositioning: false,
   allowCustomerText: false,
+  backgroundSource: 'product' as string,
   isActive: true,
 };
 
@@ -61,6 +62,7 @@ export function UploadFieldFormPage() {
   const navigate = useNavigate();
   const { id } = useParams();
   const queryClient = useQueryClient();
+  const templateInputRef = useRef<HTMLInputElement>(null);
   const isEdit = !!id;
 
   const [form, setForm] = useState(defaultForm);
@@ -74,6 +76,19 @@ export function UploadFieldFormPage() {
     queryFn: () => api.get(`/uploads/fields/${id}`).then((r) => r.data.data),
     enabled: isEdit,
   });
+
+  // Which premium features the merchant's current plan includes. Features
+  // configured here only work on the storefront if the plan allows them.
+  const { data: currentPlan } = useQuery({
+    queryKey: ['billing-current'],
+    queryFn: () => api.get('/billing/current').then((r) => r.data.data ?? r.data),
+  });
+  const planFeatures = (currentPlan?.plan?.features ?? {}) as Record<string, boolean>;
+  const planName = currentPlan?.plan?.displayName ?? '';
+  const upgradeHint = (feature: string) =>
+    planFeatures[feature] === false
+      ? `Not included in your ${planName} plan — it won't appear on your storefront until you upgrade.`
+      : undefined;
 
   useEffect(() => {
     if (field) {
@@ -96,6 +111,7 @@ export function UploadFieldFormPage() {
         allowedExtensions: Array.isArray(field.allowedExtensions)
           ? field.allowedExtensions
           : [],
+        backgroundSource: field.backgroundSource || 'product',
       });
     }
   }, [field]);
@@ -123,8 +139,8 @@ export function UploadFieldFormPage() {
     }
     saveMutation.mutate({
       ...form,
-      maxFileSizeMb: form.maxFileSizeMb !== '' && form.maxFileSizeMb != null ? Number(form.maxFileSizeMb) : 10,
-      minFileSizeMb: form.minFileSizeMb !== '' && form.minFileSizeMb != null ? Number(form.minFileSizeMb) : 0,
+      maxFileSizeMb: form.maxFileSizeMb != null && String(form.maxFileSizeMb) !== '' ? Number(form.maxFileSizeMb) : 10,
+      minFileSizeMb: form.minFileSizeMb != null && String(form.minFileSizeMb) !== '' ? Number(form.minFileSizeMb) : 0,
       minWidth: form.minWidth ? parseInt(String(form.minWidth)) : undefined,
       maxWidth: form.maxWidth ? parseInt(String(form.maxWidth)) : undefined,
       minHeight: form.minHeight ? parseInt(String(form.minHeight)) : undefined,
@@ -159,6 +175,24 @@ export function UploadFieldFormPage() {
     const file = e.target.files?.[0];
     if (file) templateUploadMutation.mutate(file);
   };
+
+  // Clears the saved mockup so a wrong one can be removed/replaced. Uses the
+  // existing field-update endpoint (PATCH) to blank previewTemplateUrl — the
+  // storefront then falls back to the product image automatically.
+  const removeTemplateMutation = useMutation({
+    mutationFn: () => api.delete(`/uploads/fields/${id}/preview-template`),
+    onSuccess: () => {
+      // Clear locally only — the backend has already removed it. We deliberately
+      // do NOT refetch/invalidate here: that would re-run the form-reset effect
+      // and (a) fight this clear and (b) discard any other unsaved edits.
+      set('previewTemplateUrl')('');
+      if (templateInputRef.current) templateInputRef.current.value = '';
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message;
+      setError(Array.isArray(msg) ? msg.join('. ') : (msg ?? 'Failed to remove template'));
+    },
+  });
 
   const setPlacement = (key: 'x' | 'y' | 'width' | 'height') => (value: string) => {
     const num = Math.max(0, Math.min(100, Number(value) || 0));
@@ -202,7 +236,7 @@ export function UploadFieldFormPage() {
   return (
     <Page
       title={isEdit ? 'Edit Upload Field' : 'Create Upload Field'}
-      breadcrumbs={[{ content: 'Upload Fields', onAction: () => navigate('/app/fields') }]}
+      backAction={{ content: 'Upload Fields', onAction: () => navigate('/app/fields') }}
       primaryAction={{
         content: 'Save',
         loading: saveMutation.isPending,
@@ -313,14 +347,16 @@ export function UploadFieldFormPage() {
                     <div>
                       <Text variant="bodyMd" as="p" fontWeight="semibold">Allowed Extensions</Text>
                       <Text variant="bodySm" tone="subdued" as="p">Leave empty to allow all types for this field</Text>
-                      <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                      <div
+                        style={{ display: 'flex', gap: '8px', marginTop: '8px' }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addExtension(); } }}
+                      >
                         <TextField
                           label=""
                           labelHidden
                           value={newExtension}
                           onChange={setNewExtension}
                           placeholder=".jpg or jpg"
-                          onKeyPress={(e: any) => e.key === 'Enter' && addExtension()}
                           autoComplete="off"
                           connectedRight={<Button onClick={addExtension}>Add</Button>}
                         />
@@ -351,14 +387,16 @@ export function UploadFieldFormPage() {
                       <div>
                         <Text variant="bodyMd" as="p" fontWeight="semibold">Product Tags</Text>
                         <Text variant="bodySm" tone="subdued" as="p">Show this field for products with these tags</Text>
-                        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                        <div
+                          style={{ display: 'flex', gap: '8px', marginTop: '8px' }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
+                        >
                           <TextField
                             label=""
                             labelHidden
                             value={newTag}
                             onChange={setNewTag}
                             placeholder="e.g. custom, personalized"
-                            onKeyPress={(e: any) => e.key === 'Enter' && addTag()}
                             autoComplete="off"
                             connectedRight={<Button onClick={addTag}>Add Tag</Button>}
                           />
@@ -411,12 +449,13 @@ export function UploadFieldFormPage() {
                       label="Enable image cropping"
                       checked={form.enableCropping}
                       onChange={set('enableCropping')}
-                      helpText="Customers can crop their image before uploading"
+                      helpText={upgradeHint('imageEditor') ?? 'Customers can crop their image before uploading'}
                     />
                     <Checkbox
                       label="Enable image rotation"
                       checked={form.enableRotation}
                       onChange={set('enableRotation')}
+                      helpText={upgradeHint('imageEditor')}
                     />
 
                     <Text variant="headingSm" as="h3">Product Preview</Text>
@@ -424,16 +463,26 @@ export function UploadFieldFormPage() {
                       label="Enable product preview"
                       checked={form.enablePreview}
                       onChange={set('enablePreview')}
-                      helpText="Customers see their uploaded image composited onto a product mockup before submitting, so they can confirm it looks right."
+                      helpText={upgradeHint('productPreview') ?? "Customers see their uploaded image composited onto a product mockup before submitting, so they can confirm it looks right."}
                     />
 
                     {form.enablePreview && (
                       <BlockStack gap="200">
+                        <Select
+                          label="Preview background image"
+                          options={[
+                            { label: 'Use the product image the customer is viewing', value: 'product' },
+                            { label: 'Use my custom mockup template (overrides the product image)', value: 'custom' },
+                          ]}
+                          value={form.backgroundSource}
+                          onChange={set('backgroundSource')}
+                          helpText="Choose what the customer's uploaded image is placed on: the store product image, or a mockup you upload below."
+                        />
                         <Checkbox
                           label="Allow customers to reposition their image"
                           checked={form.allowCustomerPositioning}
                           onChange={set('allowCustomerPositioning')}
-                          helpText="Instead of a fixed placement, customers can drag, resize, and rotate their image on the mockup themselves — like a full design tool."
+                          helpText={upgradeHint('customerPositioning') ?? "Instead of a fixed placement, customers can drag, resize, and rotate their image on the mockup themselves — like a full design tool."}
                         />
                         <Checkbox
                           label="Allow customers to add their own text"
@@ -459,9 +508,35 @@ export function UploadFieldFormPage() {
                             overlaid on top of it.
                           </Text>
                           <div style={{ marginTop: 8 }}>
-                            <input type="file" accept="image/*" onChange={handleTemplateFileChange} />
+                            <input ref={templateInputRef} type="file" accept="image/*" onChange={handleTemplateFileChange} />
                           </div>
                           {templateUploadMutation.isPending && <Spinner size="small" />}
+
+                          {form.previewTemplateUrl && (
+                            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+                              <img
+                                src={form.previewTemplateUrl}
+                                alt="Current mockup template"
+                                style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 6, border: '1px solid #dcdcdc' }}
+                              />
+                              <div>
+                                <Text as="p" variant="bodySm" tone="subdued">Current mockup template</Text>
+                                <div style={{ marginTop: 4 }}>
+                                  <Button
+                                    size="slim"
+                                    tone="critical"
+                                    onClick={() => removeTemplateMutation.mutate()}
+                                    loading={removeTemplateMutation.isPending}
+                                  >
+                                    Remove
+                                  </Button>
+                                </div>
+                                <Text as="p" variant="bodySm" tone="subdued">
+                                  To change it, choose a new file above — it replaces the current one.
+                                </Text>
+                              </div>
+                            </div>
+                          )}
                         </div>
 
                         {form.previewTemplateUrl && (

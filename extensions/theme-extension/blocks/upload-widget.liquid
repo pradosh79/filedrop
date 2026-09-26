@@ -9,6 +9,8 @@
   data-shop="{{ shop.permanent_domain }}"
   data-product-id="{{ product.id }}"
   data-variant-id="{{ product.selected_or_first_available_variant.id }}"
+  data-product-tags="{{ product.tags | join: ',' }}"
+  data-product-collections="{% for c in product.collections %}{{ c.id }}{% unless forloop.last %},{% endunless %}{% endfor %}"
   data-product-image="{{ product.selected_or_first_available_variant.featured_image | default: product.featured_image | image_url: width: 1600 }}"
   data-api-url="{{ block.settings.api_url }}"
   data-button-color="{{ block.settings.button_color }}"
@@ -320,6 +322,8 @@
   const BTN_COLOR    = widget.dataset.buttonColor || '#008060';
   const BTN_TEXT     = widget.dataset.buttonText || 'Upload File';
   const ENABLE_CAMERA = widget.dataset.enableCamera === 'true';
+  const PRODUCT_TAGS = widget.dataset.productTags || '';
+  const PRODUCT_COLLECTIONS = widget.dataset.productCollections || '';
   const container    = document.getElementById('cfup-fields-container');
 
   // Shopify cart routes, resolved by Liquid so they carry any subfolder/locale
@@ -613,6 +617,50 @@
   let pendingPreviewCallback = null;
   let pendingPreviewFile = null;
 
+  // Return the product image the shopper is CURRENTLY viewing in the gallery,
+  // so the preview/designer composites onto the selected image instead of
+  // always the first one. Clicking a gallery thumbnail is not a variant change,
+  // so PRODUCT_IMAGE (set at load / on variant:changed) doesn't cover it — we
+  // read the live DOM at upload time. Falls back to the load-time image.
+  function _upsizeShopifyImg(url) {
+    try {
+      const u = new URL(url, location.href);
+      if (/cdn\/shop|cdn\.shopify/.test(u.href)) u.searchParams.set('width', '1600');
+      return u.href;
+    } catch (e) { return url; }
+  }
+  function getCurrentProductImage() {
+    const selectors = [
+      '.product__media.is-active img, .product__media-item.is-active img',
+      '.product-single__media.is-active img, .product-single__photo.is-active img',
+      '.product__media-list .is-active img',
+      '.flickity-slider .is-selected img',
+      '.swiper-slide-active img',
+      '.slick-current img',
+      '[data-product-featured-media] img, [data-main-image] img',
+      '#ProductPhotoImg',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      const src = el && (el.currentSrc || el.src);
+      if (src) return _upsizeShopifyImg(src);
+    }
+    // Fallback: the largest product image whose centre is in the viewport (this
+    // reliably picks the main/active image, even in slider galleries).
+    let best = '', bestArea = 0;
+    document.querySelectorAll('img').forEach((img) => {
+      const src = img.currentSrc || img.src || '';
+      if (!/cdn\/shop|cdn\.shopify/.test(src)) return;
+      const r = img.getBoundingClientRect();
+      if (r.width < 150 || r.height < 150) return;
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      if (cx < 0 || cx > window.innerWidth || cy < 0 || cy > window.innerHeight) return;
+      const area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = src; }
+    });
+    return best ? _upsizeShopifyImg(best) : PRODUCT_IMAGE;
+  }
+
   function openPreview(templateUrl, placement, file, onConfirm) {
     pendingPreviewCallback = onConfirm;
     pendingPreviewFile = file;
@@ -689,6 +737,35 @@
 
   let designerCanvas = null;
   let pendingDesignerCallback = null;
+  let pendingDesignerFile = null;
+  let designerAreaRect = null;
+  let designerPrintArea = null;
+
+  // Keep an object (image or text) fully inside the designated print area:
+  // shrink it to fit if it's larger, then nudge it back inside the bounds.
+  // This is what enforces "the uploaded image/text must remain within the
+  // customization area".
+  function constrainToArea(obj) {
+    if (!obj || obj === designerAreaRect || !designerPrintArea || !designerCanvas) return;
+    const area = designerPrintArea;
+    obj.setCoords();
+    let b = obj.getBoundingRect(true);
+    const cap = Math.min(area.width / b.width, area.height / b.height, 1);
+    if (cap < 1) {
+      obj.scaleX *= cap;
+      obj.scaleY *= cap;
+      obj.setCoords();
+      b = obj.getBoundingRect(true);
+    }
+    let left = obj.left, top = obj.top;
+    if (b.left < area.left) left += area.left - b.left;
+    if (b.top < area.top) top += area.top - b.top;
+    if (b.left + b.width > area.left + area.width) left += (area.left + area.width) - (b.left + b.width);
+    if (b.top + b.height > area.top + area.height) top += (area.top + area.height) - (b.top + b.height);
+    obj.left = left;
+    obj.top = top;
+    obj.setCoords();
+  }
 
   function updateDesignerToolbar() {
     if (!designerCanvas) return;
@@ -708,6 +785,7 @@
       return;
     }
     pendingDesignerCallback = onConfirm;
+    pendingDesignerFile = file;
     const modal = document.getElementById('cfup-designer-modal');
     modal.style.display = 'flex';
 
@@ -726,13 +804,52 @@
       if (designerCanvas) { designerCanvas.dispose(); }
       designerCanvas = new fabric.Canvas('cfup-designer-canvas', { width: canvasW, height: canvasH });
 
+      // Only draw a print-area box + clamp the design when a placement is given
+      // (custom-mockup mode). In "use the product image" mode there is no
+      // designated print area, so the customer positions/sizes their image
+      // freely across the whole product — no box, no clamping.
+      designerPrintArea = null;
+      designerAreaRect = null;
+      if (initialPlacement) {
+        const pa = initialPlacement;
+        designerPrintArea = {
+          left: (pa.x / 100) * canvasW,
+          top: (pa.y / 100) * canvasH,
+          width: (pa.width / 100) * canvasW,
+          height: (pa.height / 100) * canvasH,
+        };
+        designerAreaRect = new fabric.Rect({
+          left: designerPrintArea.left,
+          top: designerPrintArea.top,
+          width: designerPrintArea.width,
+          height: designerPrintArea.height,
+          fill: 'transparent',
+          stroke: '#008060',
+          strokeDashArray: [6, 4],
+          strokeWidth: 1.5,
+          selectable: false,
+          evented: false,
+          excludeFromExport: true,
+        });
+        designerCanvas.add(designerAreaRect);
+
+        // Clamp any drag/resize/rotate back inside the print area, live.
+        designerCanvas.on('object:moving', (e) => constrainToArea(e.target));
+        designerCanvas.on('object:scaling', (e) => constrainToArea(e.target));
+        designerCanvas.on('object:rotating', (e) => constrainToArea(e.target));
+        designerCanvas.on('object:modified', (e) => { constrainToArea(e.target); designerCanvas.renderAll(); });
+      }
+
       fabric.Image.fromURL(templateUrl, (bgImg) => {
+        if (!bgImg) return; // image blocked/failed — continue without a backdrop
         bgImg.scaleToWidth(canvasW);
         designerCanvas.setBackgroundImage(bgImg, designerCanvas.renderAll.bind(designerCanvas));
       }, { crossOrigin: 'anonymous' });
 
       if (file && file.type.startsWith('image/')) {
-        const p = initialPlacement || { x: 25, y: 25, width: 50, height: 50 };
+        // Constrained mode: fit into the print area. Free mode (product image):
+        // start centred at ~40% of the canvas so there's room to move/resize.
+        const p = initialPlacement || { x: 30, y: 30, width: 40, height: 40 };
         const fileUrl = URL.createObjectURL(file);
         fabric.Image.fromURL(fileUrl, (img) => {
           const targetW = (p.width / 100) * canvasW;
@@ -749,6 +866,7 @@
             borderColor: '#008060',
           });
           designerCanvas.add(img);
+          if (designerPrintArea) constrainToArea(img);
           designerCanvas.setActiveObject(img);
           designerCanvas.renderAll();
           URL.revokeObjectURL(fileUrl);
@@ -760,6 +878,19 @@
       designerCanvas.on('selection:cleared', updateDesignerToolbar);
 
       document.getElementById('cfup-designer-add-text').style.display = opts.allowText ? 'inline-block' : 'none';
+    };
+    templateImg.onerror = () => {
+      // Base image (product photo or merchant mockup) failed to load — most
+      // often a missing-CORS mockup. Don't trap the customer in a blank
+      // designer; close it and upload their original file so add-to-cart works.
+      console.warn('[Filedrop] Designer base image failed to load — uploading the original file.');
+      const dm = document.getElementById('cfup-designer-modal');
+      if (dm) dm.style.display = 'none';
+      const cb = pendingDesignerCallback;
+      const orig = pendingDesignerFile;
+      pendingDesignerCallback = null;
+      pendingDesignerFile = null;
+      if (cb) cb(orig || file);
     };
     templateImg.src = templateUrl;
   }
@@ -780,9 +911,12 @@
 
   document.getElementById('cfup-designer-add-text').addEventListener('click', () => {
     if (!designerCanvas) return;
+    const cx = designerPrintArea ? (designerPrintArea.left + designerPrintArea.width / 2) : (designerCanvas.width / 2);
+    const cy = designerPrintArea ? (designerPrintArea.top + designerPrintArea.height / 2) : (designerCanvas.height / 2);
     const text = new fabric.Textbox('Your text here', {
-      left: designerCanvas.width / 2 - 70,
-      top: designerCanvas.height / 2 - 15,
+      left: cx - 70,
+      top: cy - 15,
+      width: Math.min(160, designerPrintArea ? designerPrintArea.width : 160),
       fontSize: 28,
       fill: '#000000',
       fontFamily: 'Arial, sans-serif',
@@ -790,6 +924,7 @@
       borderColor: '#008060',
     });
     designerCanvas.add(text);
+    constrainToArea(text);
     designerCanvas.setActiveObject(text);
     designerCanvas.renderAll();
     updateDesignerToolbar();
@@ -816,14 +951,31 @@
   document.getElementById('cfup-designer-confirm').addEventListener('click', () => {
     if (!designerCanvas || !pendingDesignerCallback) return;
     designerCanvas.discardActiveObject();
+    if (designerAreaRect) { designerCanvas.remove(designerAreaRect); designerAreaRect = null; }
     designerCanvas.renderAll();
-    designerCanvas.getElement().toBlob((blob) => {
+    const finish = (fileToUpload) => {
       document.getElementById('cfup-designer-modal').style.display = 'none';
-      const designedFile = new File([blob], 'custom-design.png', { type: 'image/png' });
       const cb = pendingDesignerCallback;
+      const orig = pendingDesignerFile;
       pendingDesignerCallback = null;
-      cb(designedFile);
-    }, 'image/png');
+      pendingDesignerFile = null;
+      cb(fileToUpload || orig);
+    };
+    try {
+      designerCanvas.getElement().toBlob((blob) => {
+        if (!blob) {
+          console.warn('[Filedrop] Could not render the design — uploading the original file instead.');
+          finish(null);
+          return;
+        }
+        finish(new File([blob], 'custom-design.png', { type: 'image/png' }));
+      }, 'image/png');
+    } catch (e) {
+      // Tainted-canvas SecurityError (base image served without CORS headers) —
+      // upload the customer's original file so they're never stuck.
+      console.warn('[Filedrop] Design export failed (likely a CORS-tainted image) — uploading the original file.', e);
+      finish(null);
+    }
   });
 
   // ── Fetch fields ─────────────────────────────────────────────────────────
@@ -940,6 +1092,8 @@
       url.searchParams.set('shop', SHOP);
       url.searchParams.set('productId', PRODUCT_ID);
       if (variantId) url.searchParams.set('variantId', variantId);
+      if (PRODUCT_TAGS) url.searchParams.set('tags', PRODUCT_TAGS);
+      if (PRODUCT_COLLECTIONS) url.searchParams.set('collections', PRODUCT_COLLECTIONS);
 
       const res = await fetch(url.toString());
       if (!res.ok) {
@@ -1160,21 +1314,31 @@
         // image is always correct for whichever product the customer is
         // actually viewing. The merchant's custom template (if any) is
         // still used as a fallback for products with no image at all.
-        const canvasImage = PRODUCT_IMAGE || field.previewTemplateUrl;
+        // Choose the preview/designer background per the merchant's setting:
+        //  - 'custom': use the merchant's uploaded mockup (overrides product img)
+        //  - 'product' (default): use the product image the shopper is viewing
+        const useCustomMockup = field.backgroundSource === 'custom' && field.previewTemplateUrl;
+        const canvasImage = useCustomMockup
+          ? field.previewTemplateUrl
+          : (getCurrentProductImage() || field.previewTemplateUrl);
 
         if (field.enablePreview && canvasImage && field.allowCustomerPositioning) {
           // Full designer: customer drags/resizes/rotates their image and
-          // can add text — this replaces the fixed compositing preview.
+          // can add text. The print-area box only applies when a custom mockup
+          // with a defined placement is used; on the plain product image there
+          // is no designated area, so the customer positions freely (no box).
+          const placementForDesigner = useCustomMockup ? (field.previewPlacement || null) : null;
           openDesigner(
             canvasImage,
-            field.previewPlacement,
+            placementForDesigner,
             f,
             { allowText: !!field.allowCustomerText },
             (designedFile) => uploadFile(designedFile),
           );
         } else if (field.enablePreview && canvasImage) {
           // Simpler mode: fixed placement, preview-only confirmation.
-          openPreview(canvasImage, field.previewPlacement, f, (confirmedFile) => uploadFile(confirmedFile));
+          const placementForPreview = useCustomMockup ? field.previewPlacement : null;
+          openPreview(canvasImage, placementForPreview, f, (confirmedFile) => uploadFile(confirmedFile));
         } else {
           uploadFile(f);
         }
@@ -1251,7 +1415,10 @@
         await new Promise((resolve, reject) => {
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
-              const res = JSON.parse(xhr.responseText);
+              let res;
+              try { res = JSON.parse(xhr.responseText); }
+              catch { reject(new Error('Upload failed. Please try again.')); return; }
+              if (!res || !res.data) { reject(new Error('Upload failed. Please try again.')); return; }
               uploadedFiles.push(res.data);
               uploadedFileIds.push(res.data.id);
               allUploadedIds.push(res.data.id);

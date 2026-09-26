@@ -16,6 +16,32 @@ function extractArray(d: any): any[] {
   return [];
 }
 
+// The per-plan feature flags the storefront/admin enforce. Editing these here
+// controls which features are available on each plan.
+const FEATURES: { key: string; label: string }[] = [
+  { key: 'imageEditor', label: 'Image editor (crop/rotate)' },
+  { key: 'productPreview', label: 'Live product preview' },
+  { key: 'customerPositioning', label: 'Customer can reposition their design' },
+  { key: 'conditionalLogic', label: 'Conditional upload logic (assignment rules)' },
+  { key: 'emailNotifications', label: 'Email notifications' },
+  { key: 'customBranding', label: 'Custom branding' },
+  { key: 'prioritySupport', label: 'Priority support' },
+];
+
+// Optional capability a feature row can be tied to. Picking one makes the row
+// actually unlock that feature on the plan (gated by the app). Leaving it blank
+// makes the row display-only marketing text.
+const CAPABILITIES: { value: string; label: string }[] = [
+  { value: '', label: '— display only —' },
+  { value: 'imageEditor', label: 'Unlocks: Image editor' },
+  { value: 'productPreview', label: 'Unlocks: Live product preview' },
+  { value: 'customerPositioning', label: 'Unlocks: Customer positioning' },
+  { value: 'conditionalLogic', label: 'Unlocks: Conditional upload logic' },
+  { value: 'emailNotifications', label: 'Unlocks: Email notifications' },
+  { value: 'customBranding', label: 'Unlocks: Custom branding' },
+  { value: 'prioritySupport', label: 'Unlocks: Priority support' },
+];
+
 export function AdminPlans() {
   const [plans, setPlans] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49,6 +75,14 @@ export function AdminPlans() {
             storageGB: bytesToGB(p.storageBytes ?? 1073741824),
             maxFileSizeMB: bytesToMB(p.maxFileSizeBytes ?? 10485760),
             isActive: p.isActive !== false,
+            features: { ...(p.features || {}) },
+            // Editable feature rows. Use the saved list if present, otherwise
+            // convert the plan's current boolean features into editable rows so
+            // the admin sees today's features immediately.
+            featureList:
+              Array.isArray(p.featureList) && p.featureList.length
+                ? p.featureList.map((f: any) => ({ label: f.label || '', capability: f.capability || '' }))
+                : FEATURES.filter((ft) => (p.features || {})[ft.key]).map((ft) => ({ label: ft.label, capability: ft.key })),
           };
         });
         setPlans(list);
@@ -74,6 +108,7 @@ export function AdminPlans() {
           storageBytes: gbToBytes(e.storageGB),
           maxFileSizeBytes: mbToBytes(e.maxFileSizeMB),
           isActive: e.isActive,
+          featureList: (e.featureList || []).filter((f: any) => f && (f.label || f.capability)),
         }),
       });
       const d = await r.json();
@@ -82,6 +117,60 @@ export function AdminPlans() {
     } catch (err: any) { setToast(`Error: ${err.message}`); }
     setSaving('');
   };
+
+  const createPlan = async () => {
+    setToast('');
+    try {
+      const r = await fetch(`${BACKEND}/admin/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+        body: JSON.stringify({
+          displayName: 'New Plan',
+          monthlyPrice: 0,
+          uploadsPerMonth: 100,
+          storageBytes: 2147483648,   // 2 GB
+          maxFileSizeBytes: 10485760, // 10 MB
+          features: {},
+          isActive: true,
+          sortOrder: 99,
+        }),
+      });
+      const d = await r.json();
+      if (r.ok) { setToast('New plan created — edit its details below.'); load(); }
+      else setToast(`Error: ${d.message}`);
+    } catch (err: any) { setToast(`Error: ${err.message}`); }
+  };
+
+  const deletePlan = async (id: string, displayName: string) => {
+    if (!window.confirm(`Delete the "${displayName}" plan?\n\nMerchants already on it keep it, but it will be hidden from new sign-ups.`)) return;
+    setToast('');
+    try {
+      const r = await fetch(`${BACKEND}/admin/plans/${id}`, {
+        method: 'DELETE',
+        headers: { 'x-admin-key': adminKey },
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setToast(d.deactivated ? 'Plan is in use — deactivated (hidden from new sign-ups).' : 'Plan deleted.');
+        load();
+      } else setToast(`Error: ${d.message || 'Failed to delete plan'}`);
+    } catch (err: any) { setToast(`Error: ${err.message}`); }
+  };
+
+  const addFeature = (id: string) =>
+    setEdits(p => ({ ...p, [id]: { ...p[id], featureList: [...(p[id]?.featureList || []), { label: '', capability: '' }] } }));
+  const updateFeature = (id: string, idx: number, patch: any) =>
+    setEdits(p => {
+      const list = [...(p[id]?.featureList || [])];
+      list[idx] = { ...list[idx], ...patch };
+      return { ...p, [id]: { ...p[id], featureList: list } };
+    });
+  const removeFeature = (id: string, idx: number) =>
+    setEdits(p => {
+      const list = [...(p[id]?.featureList || [])];
+      list.splice(idx, 1);
+      return { ...p, [id]: { ...p[id], featureList: list } };
+    });
 
   const f = { fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif' };
 
@@ -106,7 +195,16 @@ export function AdminPlans() {
   return (
     <div style={{ ...f, padding: 32 }}>
       <h1 style={{ fontSize: 24, fontWeight: 600, marginBottom: 8 }}>Plan Management</h1>
-      <p style={{ color: '#637381', marginBottom: 24 }}>Edit pricing, limits and features for each plan</p>
+      <p style={{ color: '#637381', marginBottom: 16 }}>Add, edit or remove plans — pricing, limits and features. Changes apply to the app's Plan &amp; Billing page.</p>
+
+      <div style={{ marginBottom: 24 }}>
+        <button
+          onClick={createPlan}
+          style={{ background: '#008060', color: '#fff', border: 'none', borderRadius: 6, padding: '10px 20px', cursor: 'pointer', fontSize: 14, fontWeight: 600 }}
+        >
+          + Add Plan
+        </button>
+      </div>
 
       {toast && (
         <div style={{ background: toast.startsWith('Error') ? '#fbeae5' : '#e3f1df', border: '1px solid', borderColor: toast.startsWith('Error') ? '#de3618' : '#008060', borderRadius: 8, padding: '12px 16px', marginBottom: 20 }}>
@@ -158,7 +256,56 @@ export function AdminPlans() {
             </div>
           </div>
 
-          <div style={{ padding: '0 24px 24px', display: 'flex', justifyContent: 'flex-end' }}>
+          <div style={{ padding: '0 24px 20px' }}>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Features for this plan</label>
+            <p style={{ fontSize: 12, color: '#637381', margin: '0 0 12px' }}>
+              These show on the app's Plan &amp; Billing page. Pick a capability to also <em>unlock</em> that feature on this plan; leave “display only” for marketing text.
+            </p>
+            {(edits[plan.id]?.featureList || []).map((feat: any, idx: number) => (
+              <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <input
+                  type="text"
+                  value={feat.label}
+                  placeholder="Feature label shown to merchants"
+                  onChange={e => updateFeature(plan.id, idx, { label: e.target.value })}
+                  style={{ flex: 1, padding: '8px 10px', border: '1px solid #c4cdd5', borderRadius: 6, fontSize: 13 }}
+                />
+                <select
+                  value={feat.capability || ''}
+                  onChange={e => updateFeature(plan.id, idx, { capability: e.target.value })}
+                  title="Optionally tie this row to a real feature the app enforces"
+                  style={{ padding: '8px 10px', border: '1px solid #c4cdd5', borderRadius: 6, fontSize: 13, minWidth: 230 }}
+                >
+                  {CAPABILITIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                </select>
+                <button
+                  onClick={() => removeFeature(plan.id, idx)}
+                  title="Delete this feature"
+                  style={{ background: '#fff', color: '#de3618', border: '1px solid #de3618', borderRadius: 6, padding: '8px 12px', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() => addFeature(plan.id)}
+              style={{ background: '#f4f6f8', border: '1px solid #c4cdd5', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 500, marginTop: 4 }}
+            >
+              + Add feature
+            </button>
+          </div>
+
+          <div style={{ padding: '0 24px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              {!plan.isDefault && (
+                <button
+                  onClick={() => deletePlan(plan.id, plan.displayName)}
+                  style={{ background: '#fff', color: '#de3618', border: '1px solid #de3618', borderRadius: 6, padding: '10px 20px', cursor: 'pointer', fontSize: 14, fontWeight: 500 }}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
             <button
               onClick={() => save(plan.id)}
               disabled={saving === plan.id}
